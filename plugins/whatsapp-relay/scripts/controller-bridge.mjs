@@ -20,6 +20,11 @@ import {
   DEFAULT_TRANSCRIPTION_MODEL,
   transcribeVoiceNote
 } from "./voice-transcriber.mjs";
+import {
+  DEFAULT_VOICE_REPLY_SPEED,
+  normalizeVoiceReplySpeed,
+  synthesizeVoiceReply
+} from "./voice-replier.mjs";
 
 const MAX_WHATSAPP_MESSAGE = 3500;
 const HEARTBEAT_MS = 30_000;
@@ -28,6 +33,9 @@ const OUTBOX_POLL_MS = 1_000;
 const SESSION_LIST_LIMIT = 12;
 const SESSION_CONNECT_SEARCH_LIMIT = 50;
 const DANGER_CONFIRMATION_WINDOW_MS = 60_000;
+const VOICE_REPLY_SPEEDS = new Set(["1x", "2x"]);
+const LOGGED_OUT_RECOVERY_MS = 60_000;
+
 function normalizeTimestamp(value) {
   if (value === undefined || value === null) {
     return null;
@@ -122,6 +130,7 @@ function helpText() {
     "/sessions -> list recent Codex threads you can connect to",
     "/connect <thread-id-prefix> -> switch this chat to another Codex thread",
     "/permissions [level] -> inspect or change read-only, workspace-write, or danger-full-access",
+    "/voice [status|on|off] [1x|2x] -> inspect or change voice reply mode for this chat",
     "/approve [session] -> approve the pending action once or for this session",
     "/deny -> decline the pending action",
     "/cancel -> cancel the pending action",
@@ -130,7 +139,129 @@ function helpText() {
     "",
     "Any other text in this direct chat continues your current Codex session.",
     `Voice notes are transcribed locally with ${DEFAULT_TRANSCRIPTION_MODEL}.`,
-    "Short spoken commands are supported for help, status, stop, and new session."
+    "Short spoken commands are supported for help, status, stop, and new session.",
+    "Prefix a prompt with 'respondeme en voz a 1x' or 'respondeme en voz a 2x' for a one-off spoken reply."
+  ].join("\n");
+}
+
+function resolveSessionVoiceReply(session = {}) {
+  const reply = session.voiceReply ?? {};
+  return {
+    enabled: reply.enabled === true,
+    speed: normalizeVoiceReplySpeed(reply.speed, DEFAULT_VOICE_REPLY_SPEED)
+  };
+}
+
+function formatVoiceReplySummary(voiceReply) {
+  return voiceReply.enabled ? `on (${voiceReply.speed})` : "off";
+}
+
+function parseRequestedVoiceReplySpeed(rawSpeed) {
+  const normalized = normalizeVoiceCommandText(rawSpeed).replace(/\s+/g, "");
+  switch (normalized) {
+    case "":
+      return DEFAULT_VOICE_REPLY_SPEED;
+    case "1x":
+    case "onex":
+    case "unox":
+    case "unoequis":
+    case "oneex":
+      return "1x";
+    case "2x":
+    case "twox":
+    case "twoex":
+    case "dosx":
+    case "dosequis":
+      return "2x";
+    default:
+      return normalizeVoiceReplySpeed(rawSpeed, DEFAULT_VOICE_REPLY_SPEED);
+  }
+}
+
+export function parseVoiceReplyCommandPayload(payload) {
+  const trimmed = String(payload ?? "").trim();
+  if (!trimmed || trimmed.toLowerCase() === "status") {
+    return { action: "status" };
+  }
+
+  const tokens = trimmed.split(/\s+/).filter(Boolean);
+  const [first = "", second = ""] = tokens;
+  const normalizedFirst = first.toLowerCase();
+  const normalizedSecond = second.toLowerCase();
+
+  if (normalizedFirst === "off") {
+    return { action: "off" };
+  }
+
+  if (normalizedFirst === "on") {
+    return {
+      action: "on",
+      speed: VOICE_REPLY_SPEEDS.has(normalizedSecond)
+        ? normalizedSecond
+        : DEFAULT_VOICE_REPLY_SPEED
+    };
+  }
+
+  if (VOICE_REPLY_SPEEDS.has(normalizedFirst)) {
+    return { action: "on", speed: normalizedFirst };
+  }
+
+  return { action: "unknown" };
+}
+
+export function extractOneShotVoiceReplyRequest(text) {
+  const source = String(text ?? "").trim();
+  if (!source) {
+    return null;
+  }
+
+  const speedPattern =
+    "(1x|2x|1\\s*x|2\\s*x|uno\\s*x|uno\\s*equis|unox|dos\\s*x|dos\\s*equis|dosx|one\\s*x|one\\s*ex|onex|two\\s*x|two\\s*ex|twox)";
+  const patterns = [
+    new RegExp(
+      `^\\s*(?:por favor\\s+)?(?:resp[oó]ndeme|respondeme|responde|contestame|cont[eé]stame)\\s+en\\s+voz(?:\\s+a\\s*${speedPattern})?[\\s,:-]+([\\s\\S]+)$`,
+      "i"
+    ),
+    new RegExp(
+      `^\\s*(?:please\\s+)?(?:reply(?:\\s+to\\s+me)?|answer(?:\\s+me)?)\\s+in\\s+voice(?:\\s+at\\s*${speedPattern})?[\\s,:-]+([\\s\\S]+)$`,
+      "i"
+    )
+  ];
+
+  for (const pattern of patterns) {
+    const match = source.match(pattern);
+    if (!match) {
+      continue;
+    }
+
+    const prompt = String(match.at(-1) ?? "").trim();
+    if (!prompt) {
+      return null;
+    }
+
+    return {
+      prompt,
+      voiceReply: {
+        enabled: true,
+        speed: parseRequestedVoiceReplySpeed(match[1])
+      }
+    };
+  }
+
+  return null;
+}
+
+export function buildVoiceReplyPrompt(prompt) {
+  return [
+    String(prompt ?? "").trim(),
+    "",
+    "Delivery note for the assistant:",
+    "- Your final answer will be converted into a WhatsApp voice note.",
+    "- Reply in the same language as the user.",
+    "- Write in plain, natural prose that sounds good when spoken aloud.",
+    "- If the answer is short, give the full answer.",
+    "- If it would be long, give a concise spoken summary with the key takeaway first.",
+    "- Avoid markdown tables, code fences, raw URLs, and long literal lists unless the user explicitly asks for exact text."
   ].join("\n");
 }
 
@@ -171,6 +302,8 @@ function parseIncomingCommand(text, captureAllDirectMessages) {
       case "permissions":
       case "permission":
         return { type: "permissions", payload };
+      case "voice":
+        return { type: "voiceReplySettings", payload };
       case "sessions":
       case "threads":
         return { type: "sessions" };
@@ -183,7 +316,16 @@ function parseIncomingCommand(text, captureAllDirectMessages) {
   }
 
   if (captureAllDirectMessages) {
-    return { type: "prompt", prompt: trimmed };
+    const oneShotVoiceReply = extractOneShotVoiceReplyRequest(trimmed);
+    if (oneShotVoiceReply) {
+      return {
+        type: "prompt",
+        prompt: oneShotVoiceReply.prompt,
+        voiceReply: oneShotVoiceReply.voiceReply
+      };
+    }
+
+    return { type: "prompt", prompt: trimmed, voiceReply: null };
   }
 
   return { type: "ignored" };
@@ -440,6 +582,8 @@ export class WhatsAppControllerBridge {
     this.recentMessageSet = new Set();
     this.recentOutgoingIds = [];
     this.recentOutgoingSet = new Set();
+    this.loggedOutRecoveryAtMs = 0;
+    this.loggedOutRecoveryPromise = null;
     this.unsubscribers = [];
   }
 
@@ -543,14 +687,45 @@ export class WhatsAppControllerBridge {
   }
 
   async touchHeartbeat() {
+    await this.recoverLoggedOutRuntime();
+    const summary = this.runtime.summary();
+
     await this.stateStore.setProcess({
       pid: process.pid,
       status: "running",
       heartbeatAt: new Date().toISOString(),
-      whatsappStatus: this.runtime.summary().status,
-      whatsappUserId: this.runtime.summary().user?.id ?? null,
-      whatsappLastDisconnect: this.runtime.summary().lastDisconnect ?? null
+      whatsappStatus: summary.status,
+      whatsappUserId: summary.user?.id ?? null,
+      whatsappLastDisconnect: summary.lastDisconnect ?? null
     });
+  }
+
+  async recoverLoggedOutRuntime() {
+    const summary = this.runtime.summary();
+    if (summary.status !== "logged_out" || !this.runtime.hasSavedCreds()) {
+      return;
+    }
+
+    if (this.loggedOutRecoveryPromise) {
+      await this.loggedOutRecoveryPromise.catch(() => {});
+      return;
+    }
+
+    if (Date.now() - this.loggedOutRecoveryAtMs < LOGGED_OUT_RECOVERY_MS) {
+      return;
+    }
+
+    this.loggedOutRecoveryAtMs = Date.now();
+    this.loggedOutRecoveryPromise = this.runtime
+      .start({ printQrToTerminal: false, force: true })
+      .catch((error) => {
+        console.error("failed to recover logged out WhatsApp runtime", error);
+      })
+      .finally(() => {
+        this.loggedOutRecoveryPromise = null;
+      });
+
+    await this.loggedOutRecoveryPromise;
   }
 
   summary() {
@@ -802,15 +977,35 @@ export class WhatsAppControllerBridge {
       case "stop":
         await this.stopActiveRun(phoneKey, remoteJid);
         return;
+      case "voiceReplySettings":
+        await this.handleVoiceReplyCommand({
+          phoneKey,
+          remoteJid,
+          payload: command.payload,
+          label
+        });
+        return;
       case "new":
-        await this.stateStore.removeSession(phoneKey);
+        {
+          const preservedVoiceReply = resolveSessionVoiceReply(session);
+          await this.stateStore.removeSession(phoneKey);
+          if (preservedVoiceReply.enabled) {
+            await this.stateStore.upsertSession(phoneKey, {
+              phoneKey,
+              remoteJid,
+              label,
+              voiceReply: preservedVoiceReply
+            });
+          }
+        }
         if (command.prompt) {
           await this.runPrompt({
             phoneKey,
             remoteJid,
             prompt: command.prompt,
             forceNewThread: true,
-            label
+            label,
+            voiceReplyOverride: command.voiceReply ?? null
           });
         } else {
           await this.sendReply(
@@ -847,7 +1042,8 @@ export class WhatsAppControllerBridge {
           remoteJid,
           prompt: command.prompt,
           forceNewThread: false,
-          label
+          label,
+          voiceReplyOverride: command.voiceReply ?? null
         });
         return;
       default:
@@ -859,6 +1055,7 @@ export class WhatsAppControllerBridge {
     const session = this.stateStore.data.sessions[phoneKey] ?? {};
     const active = this.activeRuns.get(phoneKey);
     const permissionLevel = resolveSessionPermissionLevel(this.configStore.data, session);
+    const voiceReply = resolveSessionVoiceReply(session);
     const pendingConfirmation =
       isConfirmationFresh(session) && session.pendingPermissionConfirmation
         ? session.pendingPermissionConfirmation
@@ -870,6 +1067,7 @@ export class WhatsAppControllerBridge {
       `busy: ${active ? "yes" : "no"}`,
       `workspace: ${this.configStore.data.workspace}`,
       `permissions: ${permissionLevel}`,
+      `voice_reply: ${formatVoiceReplySummary(voiceReply)}`,
       active?.pendingApproval ? `approval_pending: yes (${active.pendingApproval.kind})` : null,
       pendingConfirmation
         ? `danger_full_access_confirmation: pending until ${pendingConfirmation.expiresAt}`
@@ -877,7 +1075,7 @@ export class WhatsAppControllerBridge {
       session.lastPromptAt ? `last_prompt_at: ${session.lastPromptAt}` : null,
       session.lastReplyAt ? `last_reply_at: ${session.lastReplyAt}` : null,
       "",
-      "Commands: /new, /sessions, /connect, /permissions, /stop, /help"
+      "Commands: /new, /sessions, /connect, /permissions, /voice, /stop, /help"
     ]
       .filter(Boolean)
       .join("\n");
@@ -983,6 +1181,75 @@ export class WhatsAppControllerBridge {
       ]
         .filter(Boolean)
         .join("\n")
+    );
+  }
+
+  async handleVoiceReplyCommand({ phoneKey, remoteJid, payload, label }) {
+    const active = this.activeRuns.get(phoneKey);
+    if (active) {
+      await this.sendReply(
+        remoteJid,
+        "Wait for the active Codex run to finish or send /stop before changing voice reply mode."
+      );
+      return;
+    }
+
+    const session = this.stateStore.data.sessions[phoneKey] ?? {};
+    const currentVoiceReply = resolveSessionVoiceReply(session);
+    const parsed = parseVoiceReplyCommandPayload(payload);
+
+    if (parsed.action === "status") {
+      await this.sendReply(
+        remoteJid,
+        `Voice replies for this chat are ${formatVoiceReplySummary(currentVoiceReply)}.`
+      );
+      return;
+    }
+
+    if (parsed.action === "off") {
+      const nextVoiceReply = {
+        ...currentVoiceReply,
+        enabled: false
+      };
+      await this.stateStore.upsertSession(phoneKey, {
+        ...session,
+        phoneKey,
+        remoteJid,
+        label,
+        voiceReply: nextVoiceReply
+      });
+      await this.sendReply(remoteJid, "Voice replies are now off for this chat.");
+      return;
+    }
+
+    if (parsed.action === "on") {
+      const nextVoiceReply = {
+        enabled: true,
+        speed: normalizeVoiceReplySpeed(parsed.speed, currentVoiceReply.speed)
+      };
+      await this.stateStore.upsertSession(phoneKey, {
+        ...session,
+        phoneKey,
+        remoteJid,
+        label,
+        voiceReply: nextVoiceReply
+      });
+      await this.sendReply(
+        remoteJid,
+        `Voice replies are now on for this chat at ${nextVoiceReply.speed}.`
+      );
+      return;
+    }
+
+    await this.sendReply(
+      remoteJid,
+      [
+        "Usage:",
+        "/voice status",
+        "/voice on",
+        "/voice on 2x",
+        "/voice off"
+      ].join("\n")
     );
   }
 
@@ -1169,7 +1436,14 @@ export class WhatsAppControllerBridge {
     );
   }
 
-  async runPrompt({ phoneKey, remoteJid, prompt, forceNewThread, label }) {
+  async runPrompt({
+    phoneKey,
+    remoteJid,
+    prompt,
+    forceNewThread,
+    label,
+    voiceReplyOverride = null
+  }) {
     const active = this.activeRuns.get(phoneKey);
     if (active) {
       await this.sendReply(
@@ -1185,10 +1459,24 @@ export class WhatsAppControllerBridge {
     const config = this.configStore.data;
     const existingThreadId = forceNewThread ? null : session.threadId ?? null;
     const permissionLevel = resolveSessionPermissionLevel(config, session);
+    const sessionVoiceReply = resolveSessionVoiceReply(session);
+    const activeVoiceReply =
+      voiceReplyOverride && voiceReplyOverride.enabled
+        ? {
+            enabled: true,
+            speed: normalizeVoiceReplySpeed(
+              voiceReplyOverride.speed,
+              sessionVoiceReply.speed
+            )
+          }
+        : sessionVoiceReply;
+    const promptForCodex = activeVoiceReply.enabled
+      ? buildVoiceReplyPrompt(prompt)
+      : prompt;
     const { child, interrupt, answerApproval, resultPromise } = startCodexTurn({
       codexBin: config.codexBin,
       workspace: config.workspace,
-      prompt,
+      prompt: promptForCodex,
       threadId: existingThreadId,
       threadName: existingThreadId
         ? null
@@ -1245,7 +1533,8 @@ export class WhatsAppControllerBridge {
       threadId: existingThreadId,
       startedAt: new Date().toISOString(),
       cancelled: false,
-      pendingApproval: null
+      pendingApproval: null,
+      voiceReply: activeVoiceReply
     };
     this.activeRuns.set(phoneKey, activeRun);
 
@@ -1258,6 +1547,7 @@ export class WhatsAppControllerBridge {
       pendingPermissionConfirmation: null,
       lastPromptAt: new Date().toISOString(),
       lastPromptText: prompt,
+      lastPromptVoiceReply: activeVoiceReply.enabled ? activeVoiceReply : null,
       threadId: existingThreadId
     });
 
@@ -1280,8 +1570,29 @@ export class WhatsAppControllerBridge {
         threadId: result.threadId,
         pendingApproval: null,
         lastReplyAt: new Date().toISOString(),
-        lastReplyPreview: result.replyText.slice(0, 200)
+        lastReplyPreview: result.replyText.slice(0, 200),
+        lastReplyVoiceReply: activeVoiceReply.enabled ? activeVoiceReply : null
       });
+
+      if (activeVoiceReply.enabled) {
+        try {
+          await this.sendVoiceReply(remoteJid, result.replyText, activeVoiceReply);
+        } catch (error) {
+          await this.sendReply(
+            remoteJid,
+            `Failed to generate the voice reply locally: ${error.message}`
+          );
+          await this.sendReply(
+            remoteJid,
+            [
+              `Session ${shortThreadId(result.threadId)}:`,
+              "",
+              result.replyText
+            ].join("\n")
+          );
+        }
+        return;
+      }
 
       await this.sendReply(
         remoteJid,
@@ -1318,6 +1629,17 @@ export class WhatsAppControllerBridge {
     await this.sendTextMessage(remoteJid, text);
   }
 
+  async sendVoiceReply(remoteJid, text, voiceReply) {
+    const synthesized = await synthesizeVoiceReply({
+      text,
+      speed: voiceReply?.speed
+    });
+    await this.sendVoiceNoteMessage(remoteJid, synthesized.audioBuffer, {
+      mimetype: synthesized.mimetype,
+      seconds: synthesized.seconds
+    });
+  }
+
   async sendTextMessage(chatId, text) {
     const socket = await this.runtime.ensureConnected();
 
@@ -1325,5 +1647,21 @@ export class WhatsAppControllerBridge {
       const sent = await socket.sendMessage(chatId, { text: part });
       this.rememberOutgoingMessage(sent?.key?.id ?? null);
     }
+  }
+
+  async sendVoiceNoteMessage(chatId, audioBuffer, { mimetype, seconds } = {}) {
+    const socket = await this.runtime.ensureConnected();
+    const content = {
+      audio: Buffer.isBuffer(audioBuffer) ? audioBuffer : Buffer.from(audioBuffer ?? ""),
+      ptt: true,
+      mimetype: mimetype ?? "audio/ogg; codecs=opus"
+    };
+
+    if (Number.isFinite(seconds) && seconds > 0) {
+      content.seconds = seconds;
+    }
+
+    const sent = await socket.sendMessage(chatId, content);
+    this.rememberOutgoingMessage(sent?.key?.id ?? null);
   }
 }

@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  extractOneShotVoiceReplyRequest,
+  parseVoiceReplyCommandPayload,
   normalizeVoiceCommandText,
   parseVoiceTranscript
 } from "./controller-bridge.mjs";
@@ -32,4 +34,51 @@ test("parseVoiceTranscript respects captureAllDirectMessages when no voice comma
   assert.deepEqual(parseVoiceTranscript("please fix the checkout button", false), {
     type: "ignored"
   });
+});
+
+test("parseVoiceReplyCommandPayload parses status and speed controls", () => {
+  assert.deepEqual(parseVoiceReplyCommandPayload(""), { action: "status" });
+  assert.deepEqual(parseVoiceReplyCommandPayload("on"), {
+    action: "on",
+    speed: "1x"
+  });
+  assert.deepEqual(parseVoiceReplyCommandPayload("on 2x"), {
+    action: "on",
+    speed: "2x"
+  });
+  assert.deepEqual(parseVoiceReplyCommandPayload("2x"), {
+    action: "on",
+    speed: "2x"
+  });
+  assert.deepEqual(parseVoiceReplyCommandPayload("off"), { action: "off" });
+});
+
+test("extractOneShotVoiceReplyRequest pulls a one-off spoken reply directive out of text", () => {
+  assert.deepEqual(
+    extractOneShotVoiceReplyRequest(
+      "Respondeme en voz a 2x explicame que cambio en este PR"
+    ),
+    {
+      prompt: "explicame que cambio en este PR",
+      voiceReply: {
+        enabled: true,
+        speed: "2x"
+      }
+    }
+  );
+});
+
+test("extractOneShotVoiceReplyRequest accepts transcribed speed variants like unox", () => {
+  assert.deepEqual(
+    extractOneShotVoiceReplyRequest(
+      "Respóndeme en voz a unox en qué proyecto estamos trabajando"
+    ),
+    {
+      prompt: "en qué proyecto estamos trabajando",
+      voiceReply: {
+        enabled: true,
+        speed: "1x"
+      }
+    }
+  );
 });
