@@ -67,7 +67,7 @@ function defaultConfig() {
     search: false,
     captureAllDirectMessages: true,
     ttsProvider: "chatterbox-turbo",
-    ttsChatterboxAllowNonEnglish: false,
+    ttsChatterboxAllowNonEnglish: true,
     allowedControllers: []
   };
 }
@@ -81,7 +81,7 @@ function normalizeConfig(config = {}) {
   delete merged.fullAuto;
   merged.permissionLevel = resolvePermissionLevel(merged.permissionLevel);
   merged.ttsProvider = normalizeTtsProvider(merged.ttsProvider, "chatterbox-turbo");
-  merged.ttsChatterboxAllowNonEnglish = merged.ttsChatterboxAllowNonEnglish === true;
+  merged.ttsChatterboxAllowNonEnglish = merged.ttsChatterboxAllowNonEnglish !== false;
 
   const seen = new Set();
   merged.allowedControllers = (merged.allowedControllers ?? [])

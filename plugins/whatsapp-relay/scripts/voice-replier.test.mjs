@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   buildSpokenReplyText,
+  detectSpeechLanguageId,
   detectSpeechLocale,
   normalizeTtsProvider,
   normalizeVoiceReplySpeed,
@@ -56,14 +57,28 @@ test("detectSpeechLocale distinguishes English, Spanish, and other languages con
   assert.equal(detectSpeechLocale("Bonjour, je peux te faire un resume rapide."), "other");
 });
 
-test("resolveEffectiveTtsProvider falls back for non-English Chatterbox replies by default", () => {
+test("detectSpeechLanguageId recognizes supported languages for Chatterbox routing", () => {
+  assert.equal(detectSpeechLanguageId("Please give me the short answer in voice."), "en");
+  assert.equal(detectSpeechLanguageId("Claro, te doy el resumen corto ahora."), "es");
+  assert.equal(detectSpeechLanguageId("Claro, eu te dou o resumo curto agora."), "pt");
+  assert.equal(detectSpeechLanguageId("Certo, ti do il riassunto breve adesso."), "it");
+  assert.equal(
+    detectSpeechLanguageId(
+      "Bonjour, je peux te faire un resume rapide et clair si tu veux."
+    ),
+    "fr"
+  );
+});
+
+test("resolveEffectiveTtsProvider keeps Chatterbox on for supported multilingual replies by default", () => {
   const previous = process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH;
-  delete process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH;
+  process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH = "1";
 
   try {
     assert.equal(resolveEffectiveTtsProvider("chatterbox-turbo", "en"), "chatterbox-turbo");
-    assert.equal(resolveEffectiveTtsProvider("chatterbox-turbo", "es"), "system");
-    assert.equal(resolveEffectiveTtsProvider("chatterbox-turbo", "other"), "system");
+    assert.equal(resolveEffectiveTtsProvider("chatterbox-turbo", "es"), "chatterbox-turbo");
+    assert.equal(resolveEffectiveTtsProvider("chatterbox-turbo", "pt"), "chatterbox-turbo");
+    assert.equal(resolveEffectiveTtsProvider("chatterbox-turbo", "it"), "chatterbox-turbo");
     assert.equal(resolveEffectiveTtsProvider("system", "es"), "system");
   } finally {
     if (previous === undefined) {
@@ -74,13 +89,14 @@ test("resolveEffectiveTtsProvider falls back for non-English Chatterbox replies 
   }
 });
 
-test("resolveEffectiveTtsProvider allows non-English Chatterbox replies when explicitly enabled", () => {
+test("resolveEffectiveTtsProvider can still force system fallback for non-English replies", () => {
   const previous = process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH;
-  process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH = "1";
+  process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH = "0";
 
   try {
-    assert.equal(resolveEffectiveTtsProvider("chatterbox-turbo", "es"), "chatterbox-turbo");
-    assert.equal(resolveEffectiveTtsProvider("chatterbox-turbo", "other"), "chatterbox-turbo");
+    assert.equal(resolveEffectiveTtsProvider("chatterbox-turbo", "es"), "system");
+    assert.equal(resolveEffectiveTtsProvider("chatterbox-turbo", "pt"), "system");
+    assert.equal(resolveEffectiveTtsProvider("chatterbox-turbo", null), "system");
   } finally {
     if (previous === undefined) {
       delete process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH;
