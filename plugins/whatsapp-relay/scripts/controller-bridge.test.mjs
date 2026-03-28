@@ -168,7 +168,8 @@ test("extractOneShotVoiceReplyRequest accepts transcribed speed variants like on
 
 test("buildVoiceReplyPrompt instructs Codex to emit a hidden reply language tag", () => {
   const prompt = buildVoiceReplyPrompt("Explain the change.");
-  assert.match(prompt, /\[\[reply_language:es\]\]/);
+  assert.match(prompt, /\[\[reply_language:<language-code>\]\]/);
+  assert.match(prompt, /for example en, es, it, or pt-BR/i);
   assert.match(prompt, /do not mention the metadata/i);
 });
 
