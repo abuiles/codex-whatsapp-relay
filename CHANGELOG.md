@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Optional local outbound TTS provider support for `ResembleAI/chatterbox-turbo`.
+- Local Chatterbox installer and smoke-test commands for operator setup.
+
+### Changed
+
+- Bridge status now reports the active outbound voice-reply provider.
+- README and skill docs now cover outbound voice replies and Chatterbox Turbo setup.
+
 ## [0.3.0] - 2026-03-28
 
 ### Added

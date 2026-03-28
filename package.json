@@ -10,8 +10,10 @@
   "scripts": {
     "whatsapp:auth": "node ./plugins/whatsapp-relay/scripts/whatsapp-auth.mjs",
     "whatsapp:controller": "node ./plugins/whatsapp-relay/scripts/controller-daemon.mjs",
+    "whatsapp:install-chatterbox": "node ./plugins/whatsapp-relay/scripts/install-chatterbox.mjs",
     "whatsapp:mcp": "node ./plugins/whatsapp-relay/scripts/mcp-server.mjs",
     "whatsapp:status": "node ./plugins/whatsapp-relay/scripts/whatsapp-status.mjs",
+    "whatsapp:tts:smoke": "node ./plugins/whatsapp-relay/scripts/voice-replier-smoke.mjs",
     "check": "node --check ./plugins/whatsapp-relay/scripts/*.mjs",
     "test": "node --test ./plugins/whatsapp-relay/scripts/*.test.mjs"
   },

@@ -21,6 +21,7 @@ import {
   transcribeVoiceNote
 } from "./voice-transcriber.mjs";
 import {
+  DEFAULT_TTS_PROVIDER,
   DEFAULT_VOICE_REPLY_SPEED,
   normalizeVoiceReplySpeed,
   synthesizeVoiceReply
@@ -1068,6 +1069,7 @@ export class WhatsAppControllerBridge {
       `workspace: ${this.configStore.data.workspace}`,
       `permissions: ${permissionLevel}`,
       `voice_reply: ${formatVoiceReplySummary(voiceReply)}`,
+      `voice_reply_provider: ${DEFAULT_TTS_PROVIDER}`,
       active?.pendingApproval ? `approval_pending: yes (${active.pendingApproval.kind})` : null,
       pendingConfirmation
         ? `danger_full_access_confirmation: pending until ${pendingConfirmation.expiresAt}`
@@ -1580,7 +1582,7 @@ export class WhatsAppControllerBridge {
         } catch (error) {
           await this.sendReply(
             remoteJid,
-            `Failed to generate the voice reply locally: ${error.message}`
+            `Failed to generate the voice reply locally with ${DEFAULT_TTS_PROVIDER}: ${error.message}`
           );
           await this.sendReply(
             remoteJid,

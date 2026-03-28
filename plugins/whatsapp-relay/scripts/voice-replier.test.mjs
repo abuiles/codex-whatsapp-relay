@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   buildSpokenReplyText,
+  normalizeTtsProvider,
   normalizeVoiceReplySpeed
 } from "./voice-replier.mjs";
 
@@ -29,4 +30,20 @@ Also visit https://example.com/raw-url
   assert.match(spoken, /link/);
   assert.doesNotMatch(spoken, /https?:\/\//);
   assert.doesNotMatch(spoken, /```/);
+});
+
+test("normalizeTtsProvider accepts system and chatterbox aliases", () => {
+  assert.equal(normalizeTtsProvider("system"), "system");
+  assert.equal(normalizeTtsProvider("say"), "system");
+  assert.equal(normalizeTtsProvider("chatterbox"), "chatterbox-turbo");
+  assert.equal(normalizeTtsProvider("chatterbox-turbo"), "chatterbox-turbo");
+  assert.equal(normalizeTtsProvider("weird", "system"), "system");
+});
+
+test("buildSpokenReplyText keeps spanish output suitable for system fallback", () => {
+  const spoken = buildSpokenReplyText(
+    "Claro, te respondo en espanol y te doy el resumen corto para escucharlo."
+  );
+
+  assert.match(spoken, /espanol/i);
 });

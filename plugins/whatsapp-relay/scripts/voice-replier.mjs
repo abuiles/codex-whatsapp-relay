@@ -2,8 +2,13 @@ import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { pluginRoot } from "./paths.mjs";
 
 export const DEFAULT_VOICE_REPLY_SPEED = "1x";
+export const DEFAULT_TTS_PROVIDER = normalizeTtsProvider(
+  process.env.WHATSAPP_RELAY_TTS_PROVIDER,
+  "system"
+);
 
 const MAX_SPOKEN_REPLY_CHARS = resolvePositiveInt(
   process.env.WHATSAPP_RELAY_TTS_MAX_CHARS,
@@ -13,6 +18,15 @@ const DEFAULT_TIMEOUT_MS = resolvePositiveInt(
   process.env.WHATSAPP_RELAY_TTS_TIMEOUT_MS,
   2 * 60 * 1000
 );
+const DEFAULT_CHATTERBOX_PYTHON = path.join(pluginRoot, ".venv-chatterbox", "bin", "python");
+const DEFAULT_CHATTERBOX_DEVICE = normalizeChatterboxDevice(
+  process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_DEVICE,
+  "auto"
+);
+const CHATTERBOX_AUDIO_PROMPT = String(
+  process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_AUDIO_PROMPT ?? ""
+).trim();
+const CHATTERBOX_TTS_SCRIPT = path.join(pluginRoot, "scripts", "chatterbox_tts.py");
 
 let voiceCachePromise = null;
 
@@ -33,6 +47,57 @@ export function normalizeVoiceReplySpeed(value, fallback = DEFAULT_VOICE_REPLY_S
   return fallback;
 }
 
+export function normalizeTtsProvider(value, fallback = DEFAULT_TTS_PROVIDER) {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase();
+
+  switch (normalized) {
+    case "system":
+    case "say":
+    case "macos":
+      return "system";
+    case "chatterbox":
+    case "chatterbox-turbo":
+    case "turbo":
+      return "chatterbox-turbo";
+    default:
+      return fallback;
+  }
+}
+
+function isTruthyEnv(value) {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  return ["1", "true", "yes", "on"].includes(normalized);
+}
+
+function normalizeChatterboxDevice(value, fallback = "auto") {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase();
+
+  if (normalized === "cpu" || normalized === "mps" || normalized === "auto") {
+    return normalized;
+  }
+
+  return fallback;
+}
+
+function resolveEffectiveTtsProvider(provider, locale) {
+  const normalizedProvider = normalizeTtsProvider(provider, DEFAULT_TTS_PROVIDER);
+  if (
+    normalizedProvider === "chatterbox-turbo" &&
+    locale !== "en" &&
+    !isTruthyEnv(process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH)
+  ) {
+    return "system";
+  }
+
+  return normalizedProvider;
+}
+
 function summarizeCommand(command, args) {
   return [command, ...args].join(" ");
 }
@@ -46,9 +111,11 @@ function summarizeFailure(command, args, stderr, stdout, signal, code) {
   return `Command failed (${exitText}): ${summarizeCommand(command, args)}${preview}`;
 }
 
-async function runCommand(command, args, { timeoutMs } = {}) {
+async function runCommand(command, args, { timeoutMs, cwd, env } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
+      cwd,
+      env,
       stdio: ["ignore", "pipe", "pipe"]
     });
 
@@ -229,6 +296,19 @@ async function resolveVoiceName(locale) {
   return null;
 }
 
+async function ensureFileExists(filePath, installHint) {
+  if (!filePath.includes(path.sep)) {
+    return;
+  }
+
+  try {
+    await fs.access(filePath);
+  } catch {
+    const hint = installHint ? ` ${installHint}` : "";
+    throw new Error(`Required file was not found: ${filePath}.${hint}`.trim());
+  }
+}
+
 function stripCodeBlocks(text) {
   return text.replace(/```[\s\S]*?```/g, " Code omitted. ");
 }
@@ -383,17 +463,47 @@ async function probeDurationSeconds(filePath) {
   }
 }
 
-export async function synthesizeVoiceReply({
-  text,
-  speed = DEFAULT_VOICE_REPLY_SPEED,
-  timeoutMs = DEFAULT_TIMEOUT_MS
-}) {
-  const spokenText = buildSpokenReplyText(text);
-  if (!spokenText) {
-    throw new Error("Voice reply text is empty.");
+function resolveChatterboxPython() {
+  const explicit = String(process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_PYTHON ?? "").trim();
+  return explicit || DEFAULT_CHATTERBOX_PYTHON;
+}
+
+function buildChatterboxArgs({ textFile, outputFile, device, audioPromptPath }) {
+  const args = [
+    CHATTERBOX_TTS_SCRIPT,
+    "--text-file",
+    textFile,
+    "--output-file",
+    outputFile,
+    "--device",
+    normalizeChatterboxDevice(device, DEFAULT_CHATTERBOX_DEVICE)
+  ];
+
+  if (audioPromptPath) {
+    args.push("--audio-prompt-path", audioPromptPath);
   }
 
-  const locale = detectSpeechLocale(spokenText);
+  return args;
+}
+
+function parseStructuredStdout(stdout) {
+  const lines = String(stdout ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const lastLine = lines.at(-1);
+  if (!lastLine) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(lastLine);
+  } catch {
+    return {};
+  }
+}
+
+async function synthesizeWithSystemVoice({ spokenText, speed, timeoutMs, locale }) {
   const voice = await resolveVoiceName(locale);
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "whatsapp-relay-tts-"));
 
@@ -421,14 +531,109 @@ export async function synthesizeVoiceReply({
 
     return {
       audioBuffer,
-      spokenText,
-      locale,
       voice,
-      speed: normalizeVoiceReplySpeed(speed),
       seconds,
-      mimetype: "audio/ogg; codecs=opus"
+      mimetype: "audio/ogg; codecs=opus",
+      provider: "system"
     };
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true });
   }
+}
+
+async function synthesizeWithChatterbox({ spokenText, speed, timeoutMs, locale }) {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "whatsapp-relay-chatterbox-"));
+  const pythonBin = resolveChatterboxPython();
+
+  try {
+    await ensureFileExists(
+      pythonBin,
+      "Run `npm run whatsapp:install-chatterbox` or set WHATSAPP_RELAY_TTS_CHATTERBOX_PYTHON."
+    );
+    await ensureFileExists(
+      CHATTERBOX_TTS_SCRIPT,
+      "The Chatterbox Turbo bridge script is missing from the plugin."
+    );
+
+    const textFile = path.join(tempDir, "reply.txt");
+    const rawAudioFile = path.join(tempDir, "reply.wav");
+    const outputFile = path.join(tempDir, "reply.ogg");
+    await fs.writeFile(textFile, spokenText, "utf8");
+
+    const { stdout } = await runCommand(
+      pythonBin,
+      buildChatterboxArgs({
+        textFile,
+        outputFile: rawAudioFile,
+        device: DEFAULT_CHATTERBOX_DEVICE,
+        audioPromptPath: CHATTERBOX_AUDIO_PROMPT
+      }),
+      { timeoutMs }
+    );
+
+    await runCommand("ffmpeg", ffmpegArgs({ inputFile: rawAudioFile, outputFile, speed }), {
+      timeoutMs
+    });
+
+    const metadata = parseStructuredStdout(stdout);
+    const [audioBuffer, seconds] = await Promise.all([
+      fs.readFile(outputFile),
+      probeDurationSeconds(outputFile)
+    ]);
+
+    return {
+      audioBuffer,
+      seconds,
+      locale,
+      device: metadata.device ?? DEFAULT_CHATTERBOX_DEVICE,
+      voice: metadata.voice_mode === "clone" ? "Chatterbox Turbo clone" : "Chatterbox Turbo",
+      mimetype: "audio/ogg; codecs=opus",
+      provider: "chatterbox-turbo"
+    };
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+export async function synthesizeVoiceReply({
+  text,
+  speed = DEFAULT_VOICE_REPLY_SPEED,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  provider = DEFAULT_TTS_PROVIDER
+}) {
+  const spokenText = buildSpokenReplyText(text);
+  if (!spokenText) {
+    throw new Error("Voice reply text is empty.");
+  }
+
+  const locale = detectSpeechLocale(spokenText);
+  const normalizedProvider = resolveEffectiveTtsProvider(provider, locale);
+
+  if (normalizedProvider === "chatterbox-turbo") {
+    const synthesized = await synthesizeWithChatterbox({
+      spokenText,
+      speed,
+      timeoutMs,
+      locale
+    });
+    return {
+      ...synthesized,
+      spokenText,
+      locale,
+      speed: normalizeVoiceReplySpeed(speed)
+    };
+  }
+
+  const synthesized = await synthesizeWithSystemVoice({
+    spokenText,
+    speed,
+    timeoutMs,
+    locale
+  });
+  return {
+    ...synthesized,
+    spokenText,
+    locale,
+    speed: normalizeVoiceReplySpeed(speed)
+  };
 }

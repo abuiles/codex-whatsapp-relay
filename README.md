@@ -12,6 +12,7 @@ The useful part is the mental model: scan a QR once, let the relay hold the What
 - ask Codex to ping someone on WhatsApp without leaving your terminal
 - keep a real Codex thread going from your phone with session switching and permission controls
 - talk to Codex with voice notes that are transcribed locally before they hit the session
+- have Codex answer back with local voice replies when you ask for them
 - use the same relay for chat inspection, message sending, and phone control
 - resume in your terminal with `codex resume`
 
@@ -90,6 +91,7 @@ Once the controller bridge is running, allowed direct chats can send:
 
 `danger-full-access` requires an explicit confirmation code sent back over WhatsApp before the bridge disables the sandbox for that chat session.
 Voice notes are transcribed locally with `mlx-community/parakeet-tdt-0.6b-v3` through `uvx` and `ffmpeg`. The bridge echoes the transcript back before acting on it, and very short low-confidence transcriptions are rejected so you can retry instead of sending garbage to Codex.
+When voice replies are enabled with `/voice on` or a one-shot `reply in voice at 2x ...` prompt, the bridge also synthesizes a local outbound WhatsApp voice note.
 
 ## What It Does
 
@@ -101,6 +103,7 @@ Voice notes are transcribed locally with `mlx-community/parakeet-tdt-0.6b-v3` th
 - can switch a phone chat between existing Codex threads
 - can run each phone chat at `read-only`, `workspace-write`, or `danger-full-access`
 - can transcribe WhatsApp voice notes locally and feed them into the active Codex session
+- can synthesize local WhatsApp voice-note replies with either macOS `say` or `ResembleAI/chatterbox-turbo`
 
 ## Safety Notes
 
@@ -124,6 +127,45 @@ Optional environment variables:
 - `WHATSAPP_RELAY_STT_TIMEOUT_MS` to extend or reduce the transcription timeout
 
 The first voice note can be noticeably slower because `uvx` may need to install `parakeet-mlx` and download the model cache.
+
+## Voice Replies
+
+Outbound voice replies are also local-first.
+
+The default provider is macOS `say`, which is fast to set up and works well for short spoken replies. If you want a neural local voice, the bridge can also run `ResembleAI/chatterbox-turbo` through a dedicated Python environment.
+
+Provider selection is controlled with environment variables:
+
+- `WHATSAPP_RELAY_TTS_PROVIDER=system` keeps the default macOS `say` path.
+- `WHATSAPP_RELAY_TTS_PROVIDER=chatterbox-turbo` switches outbound voice replies to `ResembleAI/chatterbox-turbo`.
+- `WHATSAPP_RELAY_TTS_CHATTERBOX_PYTHON` overrides the Python interpreter used for Chatterbox. By default the bridge looks for `plugins/whatsapp-relay/.venv-chatterbox/bin/python`.
+- `WHATSAPP_RELAY_TTS_CHATTERBOX_DEVICE=auto|mps|cpu` controls the Chatterbox device selection. `auto` is the default.
+- `WHATSAPP_RELAY_TTS_CHATTERBOX_AUDIO_PROMPT=/absolute/path/to/reference.wav` optionally enables voice cloning for Chatterbox with a local reference clip.
+- `WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH=1` disables the default system fallback for non-English replies. By default Turbo is treated as English-first and the bridge falls back to macOS `say` for replies that look Spanish.
+- `WHATSAPP_RELAY_TTS_TIMEOUT_MS` extends or reduces the outbound TTS timeout for either provider.
+
+To install Chatterbox Turbo locally:
+
+```bash
+npm run whatsapp:install-chatterbox
+```
+
+The installer creates `plugins/whatsapp-relay/.venv-chatterbox`, prefers `python3.11` when that interpreter can build a working virtualenv, falls back to `python3` otherwise, and installs `chatterbox-tts` there so the bridge can call it directly. It also pins `setuptools<81` because the current Perth dependency still imports `pkg_resources`.
+
+To smoke-test whichever provider is active:
+
+```bash
+npm run whatsapp:tts:smoke -- --text "Testing local voice replies."
+```
+
+To smoke-test Chatterbox Turbo explicitly:
+
+```bash
+WHATSAPP_RELAY_TTS_PROVIDER=chatterbox-turbo \
+npm run whatsapp:tts:smoke -- --provider chatterbox-turbo --text "Testing Chatterbox Turbo locally."
+```
+
+The Chatterbox path is slower than `say` because the Python process and model are loaded locally for each generated reply. It is an optional local provider, not the default. The first run is also noticeably slower because model weights are downloaded into the local Hugging Face cache. On machines where Perth's native implicit watermarker is unavailable, the helper falls back to Perth's dummy watermarker so local synthesis still works.
 
 ## CLI Fallback
 
