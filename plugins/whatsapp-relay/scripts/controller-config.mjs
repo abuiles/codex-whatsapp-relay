@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import { resolvePermissionLevel } from "./controller-permissions.mjs";
 import { authDir, controllerConfigFile, repoRoot } from "./paths.mjs";
 
 function digitsOnly(value) {
@@ -61,8 +62,8 @@ function defaultConfig() {
     codexBin: "codex",
     model: null,
     profile: null,
+    permissionLevel: "workspace-write",
     search: false,
-    fullAuto: true,
     captureAllDirectMessages: true,
     allowedControllers: []
   };
@@ -73,6 +74,9 @@ function normalizeConfig(config = {}) {
     ...defaultConfig(),
     ...config
   };
+
+  delete merged.fullAuto;
+  merged.permissionLevel = resolvePermissionLevel(merged.permissionLevel);
 
   const seen = new Set();
   merged.allowedControllers = (merged.allowedControllers ?? [])

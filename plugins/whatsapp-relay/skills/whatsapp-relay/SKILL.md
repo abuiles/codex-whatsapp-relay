@@ -31,17 +31,24 @@ Use this skill when the user wants to connect WhatsApp, inspect recent chats, re
 
    - send plain text to continue the current Codex session
    - send `/new` to start fresh
+   - send `/sessions` to list recent Codex threads
+   - send `/connect <thread-id-prefix>` to switch this chat to another Codex session
    - send `/status` to inspect the active session
+   - send `/permissions` to inspect the current permission level
+   - send `/permissions read-only|workspace-write|danger-full-access` to change the session sandbox level
+   - send `/approve`, `/approve session`, `/deny`, or `/cancel` to answer pending approvals in `workspace-write`
    - send `/stop` to cancel the in-flight Codex run
    - send `/help` to see command help
 
    The bridge uses `codex app-server` under the hood so each allowed number maps to a native Codex thread that can be resumed across messages.
+   `workspace-write` is the safe default because guarded command and file-change approvals can be answered from WhatsApp.
+   `danger-full-access` requires an explicit confirmation code from the chat before the bridge disables sandboxing for that session.
    While the bridge is running, treat it as the sole owner of the live WhatsApp session. Prefer cached reads from MCP tools and route outbound messages through the bridge instead of reconnecting a second socket.
    If the allowed controller is the same WhatsApp account linked to the plugin, the self chat can be used as the control surface and should be treated as a valid source of prompts.
 
 ## Local state
 
-- Auth credentials: `plugins/whatsapp-relay/data/auth/`
+ - Auth credentials: `plugins/whatsapp-relay/data/auth*`
 - Chat cache: `plugins/whatsapp-relay/data/store.json`
 
 ## Rules
@@ -53,3 +60,4 @@ Use this skill when the user wants to connect WhatsApp, inspect recent chats, re
 - Keep `npm run whatsapp:auth` as a local fallback, not the primary path.
 - When relaying a QR from the plugin tools, preserve the compact block as-is instead of restyling or expanding it.
 - Only allow explicit controller numbers to drive Codex from WhatsApp. Group chats should not be used as a control surface.
+- Treat anything under `plugins/whatsapp-relay/data/auth*` as sensitive local state and keep it out of git.

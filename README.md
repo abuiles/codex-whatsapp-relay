@@ -10,7 +10,7 @@ The useful part is the mental model: scan a QR once, let the relay hold the What
 
 - message yourself and treat that chat like a lightweight Codex client
 - ask Codex to ping someone on WhatsApp without leaving your terminal
-- keep a real Codex thread going from your phone with `/new`, `/status`, `/stop`, and `/help`
+- keep a real Codex thread going from your phone with session switching and permission controls
 - use the same relay for chat inspection, message sending, and phone control
 - resume in your terminal with `codex resume`
 
@@ -77,9 +77,16 @@ Once the controller bridge is running, allowed direct chats can send:
 
 - plain text to continue the current Codex session
 - `/new` to start a fresh session
+- `/sessions` to list recent Codex threads
+- `/connect <thread-id-prefix>` to switch this chat to another Codex session
 - `/status` to inspect the active session
+- `/permissions` to inspect the current permission level
+- `/permissions read-only|workspace-write|danger-full-access` to change the session sandbox level
+- `/approve`, `/approve session`, `/deny`, and `/cancel` to answer pending approval prompts in `workspace-write`
 - `/stop` to cancel the in-flight Codex run
 - `/help` to see command help
+
+`danger-full-access` requires an explicit confirmation code sent back over WhatsApp before the bridge disables the sandbox for that chat session.
 
 ## What It Does
 
@@ -88,6 +95,14 @@ Once the controller bridge is running, allowed direct chats can send:
 - lets Codex send WhatsApp messages
 - can sync older history on demand
 - can expose Codex through WhatsApp for allowed phone numbers
+- can switch a phone chat between existing Codex threads
+- can run each phone chat at `read-only`, `workspace-write`, or `danger-full-access`
+
+## Safety Notes
+
+- `workspace-write` is the default bridge permission level. It keeps the chat inside the workspace and relays approval prompts back to WhatsApp before guarded actions run.
+- `danger-full-access` is per-chat and requires a confirmation code. Use `/new` or `/permissions workspace-write` to drop back down.
+- Auth material under `plugins/whatsapp-relay/data/auth*` is local runtime state and should never be committed.
 
 ## CLI Fallback
 

@@ -3,6 +3,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 import { ControllerConfigStore } from "./controller-config.mjs";
+import {
+  normalizePermissionLevel,
+  resolvePermissionLevel
+} from "./controller-permissions.mjs";
 import { enqueueControllerCommand } from "./controller-outbox.mjs";
 import {
   getControllerProcessStatus,
@@ -90,6 +94,7 @@ function controllerSummaryLines(config, processStatus) {
     "codex_transport: app-server",
     `workspace: ${config.workspace}`,
     `codex_bin: ${config.codexBin}`,
+    `default_permission_level: ${config.permissionLevel}`,
     `capture_all_direct_messages: ${config.captureAllDirectMessages ? "yes" : "no"}`,
     `allowed_controller_count: ${config.allowedControllers.length}`
   ];
@@ -131,7 +136,7 @@ function controllerSummaryLines(config, processStatus) {
       lines.push(
         `- ${session.label ? `${session.label} ` : ""}${session.phoneKey} thread=${
           session.threadId ? session.threadId.slice(0, 8) : "none"
-        }`
+        } permissions=${session.permissionLevel ?? config.permissionLevel}`
       );
     }
   }
@@ -319,14 +324,28 @@ server.tool(
     workspace: z.string().min(1).optional(),
     model: z.string().min(1).optional(),
     profile: z.string().min(1).optional(),
+    permissionLevel: z.string().min(1).optional(),
     search: z.boolean().optional(),
     captureAllDirectMessages: z.boolean().optional()
   },
-  async ({ workspace, model, profile, search, captureAllDirectMessages }) => {
+  async ({
+    workspace,
+    model,
+    profile,
+    permissionLevel,
+    search,
+    captureAllDirectMessages
+  }) => {
     try {
       if (!runtime.hasSavedCreds()) {
         throw new Error(
           "WhatsApp is not authenticated yet. Run `whatsapp_start_auth` before starting the controller bridge."
+        );
+      }
+
+      if (permissionLevel && !normalizePermissionLevel(permissionLevel)) {
+        throw new Error(
+          "Unknown permissionLevel. Use read-only, workspace-write, or danger-full-access."
         );
       }
 
@@ -335,6 +354,9 @@ server.tool(
         ...(workspace ? { workspace } : {}),
         ...(model ? { model } : {}),
         ...(profile ? { profile } : {}),
+        ...(permissionLevel
+          ? { permissionLevel: resolvePermissionLevel(permissionLevel) }
+          : {}),
         ...(typeof search === "boolean" ? { search } : {}),
         ...(typeof captureAllDirectMessages === "boolean"
           ? { captureAllDirectMessages }
