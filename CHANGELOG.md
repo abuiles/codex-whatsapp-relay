@@ -4,11 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-03-28
+
 ### Changed
 
 - Controller bridge restarts now reuse persisted local TTS defaults from `controller-config.json`, so outbound voice replies can stay on Chatterbox across daemon restarts.
 - Chatterbox is now the default outbound TTS integration for WhatsApp voice replies, with Turbo for English and Chatterbox Multilingual for supported non-English languages.
 - The non-English override can still force macOS `say` as a fallback when operators do not want multilingual Chatterbox.
+- Voice-reply language tags are now stripped more robustly so hidden metadata does not leak into visible replies or local TTS.
+- The local smoke-test command now accepts an explicit `--language-id` override for multilingual routing checks.
+- Chatterbox install verification now checks the multilingual import path, and persisted boolean-like relay settings are normalized more safely when loaded from disk.
 
 ## [0.4.0] - 2026-03-28
 
