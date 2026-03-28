@@ -132,7 +132,7 @@ The first voice note can be noticeably slower because `uvx` may need to install 
 
 Outbound voice replies are also local-first.
 
-The default provider is `ResembleAI/chatterbox-turbo`, so WhatsApp voice replies use the neural local voice path unless you explicitly opt back into macOS `say`.
+The default provider is `ResembleAI/chatterbox-turbo`, but non-English replies still fall back to macOS `say` unless you explicitly allow Chatterbox for them.
 
 Provider selection is controlled with environment variables:
 
@@ -141,6 +141,7 @@ Provider selection is controlled with environment variables:
 - `WHATSAPP_RELAY_TTS_CHATTERBOX_PYTHON` overrides the Python interpreter used for Chatterbox. By default the bridge looks for `plugins/whatsapp-relay/.venv-chatterbox/bin/python`.
 - `WHATSAPP_RELAY_TTS_CHATTERBOX_DEVICE=auto|mps|cpu` controls the Chatterbox device selection. `auto` is the default.
 - `WHATSAPP_RELAY_TTS_CHATTERBOX_AUDIO_PROMPT=/absolute/path/to/reference.wav` optionally enables voice cloning for Chatterbox with a local reference clip.
+- `WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH=1` disables the default fallback for non-English replies, so Spanish and other non-English messages also stay on Chatterbox.
 - `WHATSAPP_RELAY_TTS_TIMEOUT_MS` extends or reduces the outbound TTS timeout for either provider.
 
 If you want the controller bridge to keep using Chatterbox across restarts, persist it in the bridge config. `whatsapp_start_controller_bridge` accepts `ttsProvider` and `ttsChatterboxAllowNonEnglish`, stores them in `plugins/whatsapp-relay/data/controller-config.json`, and reuses them for future daemon starts.
@@ -166,7 +167,7 @@ WHATSAPP_RELAY_TTS_PROVIDER=chatterbox-turbo \
 npm run whatsapp:tts:smoke -- --provider chatterbox-turbo --text "Testing Chatterbox Turbo locally."
 ```
 
-The Chatterbox path is slower than `say` because the Python process and model are loaded locally for each generated reply. It is now the default provider. The first run is also noticeably slower because model weights are downloaded into the local Hugging Face cache. If you prefer the lighter macOS voice path, set `WHATSAPP_RELAY_TTS_PROVIDER=system`. On machines where Perth's native implicit watermarker is unavailable, the helper falls back to Perth's dummy watermarker so local synthesis still works.
+The Chatterbox path is slower than `say` because the Python process and model are loaded locally for each generated reply. It is now the preferred provider, but non-English replies still fall back to the macOS voice path unless you explicitly allow Chatterbox for them. The first run is also noticeably slower because model weights are downloaded into the local Hugging Face cache. If you prefer the lighter macOS voice path everywhere, set `WHATSAPP_RELAY_TTS_PROVIDER=system`. On machines where Perth's native implicit watermarker is unavailable, the helper falls back to Perth's dummy watermarker so local synthesis still works.
 
 ## CLI Fallback
 

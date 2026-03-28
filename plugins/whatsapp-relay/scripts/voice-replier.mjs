@@ -66,6 +66,13 @@ export function normalizeTtsProvider(value, fallback = DEFAULT_TTS_PROVIDER) {
   }
 }
 
+function isTruthyEnv(value) {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  return ["1", "true", "yes", "on"].includes(normalized);
+}
+
 function normalizeChatterboxDevice(value, fallback = "auto") {
   const normalized = String(value ?? "")
     .trim()
@@ -78,8 +85,17 @@ function normalizeChatterboxDevice(value, fallback = "auto") {
   return fallback;
 }
 
-export function resolveEffectiveTtsProvider(provider, _locale) {
-  return normalizeTtsProvider(provider, DEFAULT_TTS_PROVIDER);
+export function resolveEffectiveTtsProvider(provider, locale) {
+  const normalizedProvider = normalizeTtsProvider(provider, DEFAULT_TTS_PROVIDER);
+  if (
+    normalizedProvider === "chatterbox-turbo" &&
+    locale !== "en" &&
+    !isTruthyEnv(process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH)
+  ) {
+    return "system";
+  }
+
+  return normalizedProvider;
 }
 
 function normalizeLocaleSample(text) {

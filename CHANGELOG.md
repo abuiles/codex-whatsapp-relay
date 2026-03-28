@@ -8,7 +8,7 @@ All notable changes to this project will be documented in this file.
 
 - Controller bridge restarts now reuse persisted local TTS defaults from `controller-config.json`, so outbound voice replies can stay on Chatterbox across daemon restarts.
 - Chatterbox Turbo is now the default outbound TTS provider for WhatsApp voice replies.
-- Voice replies no longer fall back to macOS `say` just because the text looks non-English.
+- Non-English voice replies now keep the macOS `say` fallback by default unless Chatterbox is explicitly allowed for them.
 
 ## [0.4.0] - 2026-03-28
 
