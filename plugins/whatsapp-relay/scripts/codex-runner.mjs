@@ -106,11 +106,33 @@ function validatePermissionRequirements(requirements, permissionLevel) {
 
   if (
     Array.isArray(allowedSandboxModes) &&
-    !allowedSandboxModes.includes(config.sandboxPolicyAppServer.type)
+    !allowedSandboxModes.includes(config.sandboxModeCli)
   ) {
     throw new Error(
-      `Codex admin requirements do not allow sandbox mode ${config.sandboxPolicyAppServer.type} for ${config.helpName}. Allowed sandbox modes: ${allowedSandboxModes.join(", ")}.`
+      `Codex admin requirements do not allow sandbox mode ${config.sandboxModeCli} for ${config.helpName}. Allowed sandbox modes: ${allowedSandboxModes.join(", ")}.`
     );
+  }
+}
+
+function decisionToApprovalResponse(request, decision) {
+  switch (request?.method) {
+    case "item/commandExecution/requestApproval":
+    case "item/fileChange/requestApproval":
+      return { decision };
+    case "item/permissions/requestApproval":
+      if (decision === "accept" || decision === "acceptForSession") {
+        return {
+          permissions: request.params?.permissions ?? {},
+          scope: decision === "acceptForSession" ? "session" : "turn"
+        };
+      }
+
+      return {
+        permissions: {},
+        scope: "turn"
+      };
+    default:
+      return decision;
   }
 }
 
@@ -169,6 +191,11 @@ function startAppServerClient({
 
   function writeMessage(payload) {
     return new Promise((resolve, reject) => {
+      if (child.stdin.destroyed || child.stdin.writableEnded) {
+        reject(new Error("Codex app-server stdin is closed."));
+        return;
+      }
+
       child.stdin.write(`${JSON.stringify(payload)}\n`, "utf8", (error) => {
         if (error) {
           reject(error);
@@ -236,6 +263,8 @@ function startAppServerClient({
   child.stderr.on("data", (chunk) => {
     stderr += chunk.toString("utf8");
   });
+
+  child.stdin.on("error", () => {});
 
   child.once("error", (error) => {
     rejectPending(error);
@@ -521,6 +550,7 @@ export function startCodexTurn({
     switch (method) {
       case "item/commandExecution/requestApproval":
       case "item/fileChange/requestApproval":
+      case "item/permissions/requestApproval":
         onApprovalRequest?.({
           requestId: id,
           threadId: params?.threadId ?? resolvedThreadId,
@@ -529,7 +559,9 @@ export function startCodexTurn({
           kind:
             method === "item/commandExecution/requestApproval"
               ? "commandExecution"
-              : "fileChange",
+              : method === "item/fileChange/requestApproval"
+                ? "fileChange"
+                : "permissions",
           availableDecisions: params?.availableDecisions ?? null,
           ...params
         });
@@ -639,11 +671,12 @@ export function startCodexTurn({
     answerApproval: async (requestId, decision) => {
       await bootstrap;
 
-      if (!client.getPendingServerRequest(requestId)) {
+      const request = client.getPendingServerRequest(requestId);
+      if (!request) {
         throw new Error(`Approval request ${requestId} is no longer pending.`);
       }
 
-      await client.respond(requestId, decision);
+      await client.respond(requestId, decisionToApprovalResponse(request, decision));
     },
     resultPromise
   };

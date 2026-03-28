@@ -238,6 +238,22 @@ function formatApprovalDetails(approval) {
     lines.push(`grant_root: ${approval.grantRoot}`);
   }
 
+  if (approval.permissions) {
+    const networkEnabled = approval.permissions.network?.enabled;
+    if (networkEnabled !== null && networkEnabled !== undefined) {
+      lines.push(`network_enabled: ${networkEnabled ? "yes" : "no"}`);
+    }
+
+    const readRoots = approval.permissions.fileSystem?.read ?? [];
+    const writeRoots = approval.permissions.fileSystem?.write ?? [];
+    if (readRoots.length) {
+      lines.push(`read_roots: ${readRoots.join(", ")}`);
+    }
+    if (writeRoots.length) {
+      lines.push(`write_roots: ${writeRoots.join(", ")}`);
+    }
+  }
+
   lines.push("");
   lines.push("Reply with /approve, /approve session, /deny, or /cancel.");
 

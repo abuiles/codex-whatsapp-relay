@@ -14,7 +14,7 @@ const PERMISSION_LEVELS = {
   },
   "workspace-write": {
     approvalPolicyCli: "on-request",
-    approvalPolicyAppServer: "onRequest",
+    approvalPolicyAppServer: "on-request",
     description:
       "Read and edit within the workspace, but require explicit approval for guarded actions.",
     dangerous: false,
