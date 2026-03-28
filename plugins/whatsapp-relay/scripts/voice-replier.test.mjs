@@ -14,18 +14,18 @@ test("normalizeVoiceReplySpeed accepts supported playback speeds", () => {
 
 test("buildSpokenReplyText strips markdown and raw links for speech", () => {
   const spoken = buildSpokenReplyText(`
-# Resultado
+# Summary
 
-Mira este [link](https://example.com/demo) y este comando:
+Look at this [link](https://example.com/demo) and this command:
 
 \`\`\`bash
 npm test
 \`\`\`
 
-Tambien visita https://example.com/raw-url
+Also visit https://example.com/raw-url
   `);
 
-  assert.match(spoken, /Resultado/);
+  assert.match(spoken, /Summary/);
   assert.match(spoken, /link/);
   assert.doesNotMatch(spoken, /https?:\/\//);
   assert.doesNotMatch(spoken, /```/);

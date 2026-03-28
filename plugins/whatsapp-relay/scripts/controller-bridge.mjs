@@ -140,7 +140,7 @@ function helpText() {
     "Any other text in this direct chat continues your current Codex session.",
     `Voice notes are transcribed locally with ${DEFAULT_TRANSCRIPTION_MODEL}.`,
     "Short spoken commands are supported for help, status, stop, and new session.",
-    "Prefix a prompt with 'respondeme en voz a 1x' or 'respondeme en voz a 2x' for a one-off spoken reply."
+    "Prefix a prompt with 'reply in voice at 1x' or 'reply in voice at 2x' for a one-off spoken reply."
   ].join("\n");
 }
 

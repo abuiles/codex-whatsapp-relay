@@ -10,20 +10,20 @@ import {
 
 test("normalizeVoiceCommandText removes accents and punctuation", () => {
   assert.equal(
-    normalizeVoiceCommandText("  Nueva sesión, por favor! "),
-    "nueva sesion por favor"
+    normalizeVoiceCommandText("  Start over, please! "),
+    "start over please"
   );
 });
 
 test("parseVoiceTranscript maps exact spoken control commands conservatively", () => {
-  assert.deepEqual(parseVoiceTranscript("Ayuda"), { type: "help" });
-  assert.deepEqual(parseVoiceTranscript("estado"), { type: "status" });
-  assert.deepEqual(parseVoiceTranscript("detente"), { type: "stop" });
-  assert.deepEqual(parseVoiceTranscript("cancelar"), {
+  assert.deepEqual(parseVoiceTranscript("help"), { type: "help" });
+  assert.deepEqual(parseVoiceTranscript("status"), { type: "status" });
+  assert.deepEqual(parseVoiceTranscript("stop"), { type: "stop" });
+  assert.deepEqual(parseVoiceTranscript("cancel"), {
     type: "approvalDecision",
     decision: "cancel"
   });
-  assert.deepEqual(parseVoiceTranscript("nueva sesión"), { type: "new", prompt: "" });
+  assert.deepEqual(parseVoiceTranscript("new session"), { type: "new", prompt: "" });
   assert.deepEqual(parseVoiceTranscript("please fix the checkout button"), {
     type: "prompt",
     prompt: "please fix the checkout button"
@@ -56,10 +56,10 @@ test("parseVoiceReplyCommandPayload parses status and speed controls", () => {
 test("extractOneShotVoiceReplyRequest pulls a one-off spoken reply directive out of text", () => {
   assert.deepEqual(
     extractOneShotVoiceReplyRequest(
-      "Respondeme en voz a 2x explicame que cambio en este PR"
+      "Reply in voice at 2x explain what changed in this PR"
     ),
     {
-      prompt: "explicame que cambio en este PR",
+      prompt: "explain what changed in this PR",
       voiceReply: {
         enabled: true,
         speed: "2x"
@@ -68,13 +68,13 @@ test("extractOneShotVoiceReplyRequest pulls a one-off spoken reply directive out
   );
 });
 
-test("extractOneShotVoiceReplyRequest accepts transcribed speed variants like unox", () => {
+test("extractOneShotVoiceReplyRequest accepts transcribed speed variants like onex", () => {
   assert.deepEqual(
     extractOneShotVoiceReplyRequest(
-      "Respóndeme en voz a unox en qué proyecto estamos trabajando"
+      "Reply in voice at onex what project are we working on"
     ),
     {
-      prompt: "en qué proyecto estamos trabajando",
+      prompt: "what project are we working on",
       voiceReply: {
         enabled: true,
         speed: "1x"
