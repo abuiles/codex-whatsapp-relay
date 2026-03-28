@@ -8,11 +8,15 @@ All notable changes to this project will be documented in this file.
 
 - Optional local outbound TTS provider support for `ResembleAI/chatterbox-turbo`.
 - Local Chatterbox installer and smoke-test commands for operator setup.
+- Shortcut commands for WhatsApp bridge control, including `/n`, `/st`, `/ls`, `/p`, `/a`, `/d`, `/q`, `/x`, and `/h`.
+- Numbered session switching so recent thread lists can be resumed with `/1`, `/2`, or `/session <number>`.
 
 ### Changed
 
 - Bridge status now reports the active outbound voice-reply provider.
 - README and skill docs now cover outbound voice replies and Chatterbox Turbo setup.
+- WhatsApp bridge help, status, MCP startup output, and docs now advertise the shorter command forms.
+- Permission switching now accepts `ro`, `ww`, and `dfa` alongside the full permission names.
 
 ## [0.3.0] - 2026-03-28
 

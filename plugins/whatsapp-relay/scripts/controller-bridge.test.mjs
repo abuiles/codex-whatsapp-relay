@@ -5,8 +5,75 @@ import {
   extractOneShotVoiceReplyRequest,
   parseVoiceReplyCommandPayload,
   normalizeVoiceCommandText,
-  parseVoiceTranscript
+  parseIncomingCommand,
+  parseVoiceTranscript,
+  resolveThreadSelection
 } from "./controller-bridge.mjs";
+import { normalizePermissionLevel } from "./controller-permissions.mjs";
+
+test("parseIncomingCommand accepts shortcut aliases for admin commands", () => {
+  assert.deepEqual(parseIncomingCommand("/h", true), { type: "help" });
+  assert.deepEqual(parseIncomingCommand("/st", true), { type: "status" });
+  assert.deepEqual(parseIncomingCommand("/n review this diff", true), {
+    type: "new",
+    prompt: "review this diff"
+  });
+  assert.deepEqual(parseIncomingCommand("/ls", true), { type: "sessions" });
+  assert.deepEqual(parseIncomingCommand("/session 2", true), {
+    type: "connect",
+    payload: "2"
+  });
+  assert.deepEqual(parseIncomingCommand("/1", true), {
+    type: "connect",
+    payload: "1"
+  });
+  assert.deepEqual(parseIncomingCommand("/p ww", true), {
+    type: "permissions",
+    payload: "ww"
+  });
+  assert.deepEqual(parseIncomingCommand("/voice on 2x", true), {
+    type: "voiceReplySettings",
+    payload: "on 2x"
+  });
+  assert.deepEqual(parseIncomingCommand("/a session", true), {
+    type: "approvalDecision",
+    decision: "acceptForSession"
+  });
+  assert.deepEqual(parseIncomingCommand("/d", true), {
+    type: "approvalDecision",
+    decision: "decline"
+  });
+  assert.deepEqual(parseIncomingCommand("/q", true), {
+    type: "approvalDecision",
+    decision: "cancel"
+  });
+  assert.deepEqual(parseIncomingCommand("/x", true), { type: "stop" });
+});
+
+test("resolveThreadSelection honors numbered shortcuts from the last listed sessions", () => {
+  const threads = [
+    {
+      id: "thread-current",
+      name: "Current",
+      preview: "current preview",
+      updatedAt: "2026-03-28T08:00:00.000Z"
+    },
+    {
+      id: "thread-other",
+      name: "Other",
+      preview: "other preview",
+      updatedAt: "2026-03-28T09:00:00.000Z"
+    }
+  ];
+  const session = {
+    lastThreadChoicesAt: new Date().toISOString(),
+    lastThreadChoices: [threads[1], threads[0]]
+  };
+
+  assert.equal(resolveThreadSelection(threads, "1", session).match?.id, "thread-other");
+  assert.equal(resolveThreadSelection(threads, "2", {}).match?.id, "thread-other");
+  assert.equal(resolveThreadSelection(threads, "3", {}).requestedShortcut, 3);
+});
 
 test("normalizeVoiceCommandText removes accents and punctuation", () => {
   assert.equal(
@@ -95,4 +162,10 @@ test("extractOneShotVoiceReplyRequest accepts transcribed speed variants like on
       }
     }
   );
+});
+
+test("normalizePermissionLevel accepts short aliases", () => {
+  assert.equal(normalizePermissionLevel("ro"), "read-only");
+  assert.equal(normalizePermissionLevel("ww"), "workspace-write");
+  assert.equal(normalizePermissionLevel("dfa"), "danger-full-access");
 });

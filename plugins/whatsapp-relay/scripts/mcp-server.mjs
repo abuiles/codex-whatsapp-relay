@@ -376,7 +376,7 @@ server.tool(
           ...controllerSummaryLines(config, processStatus),
           "",
           "Allowed direct chats can now send plain text to continue their Codex session.",
-          "Bridge commands: /new, /status, /sessions, /connect, /permissions, /approve, /deny, /cancel, /stop, /help"
+          "Bridge commands: /n, /st, /ls, /1 or /session, /p, /a, /d, /q, /x, /h"
         ].join("\n")
       );
     } catch (error) {

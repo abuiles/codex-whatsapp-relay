@@ -33,6 +33,7 @@ const RECENT_MESSAGE_LIMIT = 500;
 const OUTBOX_POLL_MS = 1_000;
 const SESSION_LIST_LIMIT = 12;
 const SESSION_CONNECT_SEARCH_LIMIT = 50;
+const THREAD_SHORTCUT_TTL_MS = 30 * 60_000;
 const DANGER_CONFIRMATION_WINDOW_MS = 60_000;
 const VOICE_REPLY_SPEEDS = new Set(["1x", "2x"]);
 const LOGGED_OUT_RECOVERY_MS = 60_000;
@@ -43,6 +44,39 @@ function invalidControllerCommandError(message) {
   error.retryable = false;
   return error;
 }
+
+const COMMAND_ALIASES = new Map([
+  ["help", "help"],
+  ["h", "help"],
+  ["status", "status"],
+  ["st", "status"],
+  ["new", "new"],
+  ["reset", "new"],
+  ["n", "new"],
+  ["stop", "stop"],
+  ["x", "stop"],
+  ["codex", "prompt"],
+  ["ask", "prompt"],
+  ["approve", "approve"],
+  ["a", "approve"],
+  ["deny", "deny"],
+  ["decline", "deny"],
+  ["d", "deny"],
+  ["cancel", "cancel"],
+  ["q", "cancel"],
+  ["permissions", "permissions"],
+  ["permission", "permissions"],
+  ["perm", "permissions"],
+  ["p", "permissions"],
+  ["voice", "voice"],
+  ["sessions", "sessions"],
+  ["threads", "sessions"],
+  ["ls", "sessions"],
+  ["connect", "connect"],
+  ["resume", "connect"],
+  ["session", "connect"],
+  ["c", "connect"]
+]);
 
 function normalizeTimestamp(value) {
   if (value === undefined || value === null) {
@@ -133,17 +167,17 @@ function sanitizeThreadPreview(value) {
 function helpText() {
   return [
     "WhatsApp Codex bridge commands:",
-    "/status -> show the current Codex session",
-    "/new [prompt] -> start a fresh session, optionally with a first prompt",
-    "/sessions -> list recent Codex threads you can connect to",
-    "/connect <thread-id-prefix> -> switch this chat to another Codex thread",
-    "/permissions [level] -> inspect or change read-only, workspace-write, or danger-full-access",
+    "/status or /st -> show the current Codex session",
+    "/new or /n [prompt] -> start a fresh session, optionally with a first prompt",
+    "/sessions or /ls -> list recent Codex threads with /1, /2, ... shortcuts",
+    "/session <n|thread-id-prefix>, /connect <...>, /c <...>, or /1 -> switch this chat to another Codex thread",
+    "/permissions or /p [ro|ww|dfa] -> inspect or change read-only, workspace-write, or danger-full-access",
     "/voice [status|on|off] [1x|2x] -> inspect or change voice reply mode for this chat",
-    "/approve [session] -> approve the pending action once or for this session",
-    "/deny -> decline the pending action",
-    "/cancel -> cancel the pending action",
-    "/stop -> stop the in-flight Codex run for this chat",
-    "/help -> show this help",
+    "/approve or /a [session] -> approve the pending action once or for this session",
+    "/deny or /d -> decline the pending action",
+    "/cancel or /q -> cancel the pending action",
+    "/stop or /x -> stop the in-flight Codex run for this chat",
+    "/help or /h -> show this help",
     "",
     "Any other text in this direct chat continues your current Codex session.",
     `Voice notes are transcribed locally with ${DEFAULT_TRANSCRIPTION_MODEL}.`,
@@ -273,29 +307,69 @@ export function buildVoiceReplyPrompt(prompt) {
   ].join("\n");
 }
 
-function parseIncomingCommand(text, captureAllDirectMessages) {
+function parseThreadShortcutIndex(value) {
+  const normalized = String(value ?? "").trim();
+  if (!/^\d+$/.test(normalized)) {
+    return null;
+  }
+
+  const index = Number.parseInt(normalized, 10);
+  return Number.isInteger(index) && index > 0 ? index : null;
+}
+
+function isFreshThreadShortcutList(session = {}) {
+  const storedAt = Date.parse(session.lastThreadChoicesAt ?? "");
+  return Number.isFinite(storedAt) && storedAt + THREAD_SHORTCUT_TTL_MS > Date.now();
+}
+
+function resolveStoredThreadShortcut(session = {}, token) {
+  const index = parseThreadShortcutIndex(token);
+  if (!index || !isFreshThreadShortcutList(session)) {
+    return null;
+  }
+
+  const choice = session.lastThreadChoices?.[index - 1];
+  return choice
+    ? {
+        id: choice.id,
+        name: choice.name ?? null,
+        preview: choice.preview ?? null,
+        updatedAt: choice.updatedAt ?? null
+      }
+    : null;
+}
+
+function formatThreadShortcut(index) {
+  return `/${index}`;
+}
+
+export function parseIncomingCommand(text, captureAllDirectMessages) {
   const trimmed = text.trim();
   if (!trimmed) {
     return { type: "empty" };
   }
 
-  const commandMatch = trimmed.match(/^\/([a-z-]+)(?:\s+([\s\S]+))?$/i);
+  const commandMatch = trimmed.match(/^\/([a-z0-9-]+)(?:\s+([\s\S]+))?$/i);
   if (commandMatch) {
     const command = commandMatch[1].toLowerCase();
     const payload = commandMatch[2]?.trim() ?? "";
+    const shortcutIndex = parseThreadShortcutIndex(command);
+    if (shortcutIndex && !payload) {
+      return { type: "connect", payload: String(shortcutIndex) };
+    }
 
-    switch (command) {
+    const normalizedCommand = COMMAND_ALIASES.get(command) ?? null;
+
+    switch (normalizedCommand) {
       case "help":
         return { type: "help" };
       case "status":
         return { type: "status" };
       case "new":
-      case "reset":
         return { type: "new", prompt: payload };
       case "stop":
         return { type: "stop" };
-      case "codex":
-      case "ask":
+      case "prompt":
         return payload ? { type: "prompt", prompt: payload } : { type: "help" };
       case "approve":
         return {
@@ -303,20 +377,16 @@ function parseIncomingCommand(text, captureAllDirectMessages) {
           decision: payload.toLowerCase() === "session" ? "acceptForSession" : "accept"
         };
       case "deny":
-      case "decline":
         return { type: "approvalDecision", decision: "decline" };
       case "cancel":
         return { type: "approvalDecision", decision: "cancel" };
       case "permissions":
-      case "permission":
         return { type: "permissions", payload };
       case "voice":
         return { type: "voiceReplySettings", payload };
       case "sessions":
-      case "threads":
         return { type: "sessions" };
       case "connect":
-      case "resume":
         return { type: "connect", payload };
       default:
         return { type: "unknown" };
@@ -535,9 +605,18 @@ function formatApprovalDetails(approval) {
 }
 
 function summarizeThread(thread, currentThreadId) {
+  return summarizeThreadChoice(thread, currentThreadId);
+}
+
+function summarizeThreadChoice(thread, currentThreadId, index = null) {
   const preview = sanitizeThreadPreview(thread.preview);
+  const shortcut = Number.isInteger(index)
+    ? ` ${formatThreadShortcut(index)}`
+    : "";
   return [
-    `- ${shortThreadId(thread.id)}${thread.id === currentThreadId ? " (current)" : ""}`,
+    `${Number.isInteger(index) ? `${index}.` : "-"} ${shortThreadId(thread.id)}${
+      thread.id === currentThreadId ? " (current)" : ""
+    }${shortcut}`,
     thread.name ? `  name=${thread.name}` : null,
     preview ? `  preview=${preview}` : null,
     thread.updatedAt ? `  updated_at=${formatThreadTimestamp(thread.updatedAt)}` : null
@@ -546,12 +625,34 @@ function summarizeThread(thread, currentThreadId) {
     .join("\n");
 }
 
-function resolveThreadSelection(threads, token) {
+export function resolveThreadSelection(threads, token, session = {}) {
   const normalized = String(token ?? "").trim();
   if (!normalized) {
     return {
       match: null,
       candidates: []
+    };
+  }
+
+  const shortcutMatch =
+    resolveStoredThreadShortcut(session, normalized) ??
+    (() => {
+      const index = parseThreadShortcutIndex(normalized);
+      return index ? threads[index - 1] ?? null : null;
+    })();
+  if (shortcutMatch) {
+    return {
+      match: shortcutMatch,
+      candidates: [shortcutMatch]
+    };
+  }
+
+  const shortcutIndex = parseThreadShortcutIndex(normalized);
+  if (shortcutIndex) {
+    return {
+      match: null,
+      candidates: [],
+      requestedShortcut: shortcutIndex
     };
   }
 
@@ -1106,7 +1207,7 @@ export class WhatsAppControllerBridge {
       session.lastPromptAt ? `last_prompt_at: ${session.lastPromptAt}` : null,
       session.lastReplyAt ? `last_reply_at: ${session.lastReplyAt}` : null,
       "",
-      "Commands: /new, /sessions, /connect, /permissions, /voice, /stop, /help"
+      "Commands: /n, /ls, /1, /session, /p, /voice, /x, /h"
     ]
       .filter(Boolean)
       .join("\n");
@@ -1129,12 +1230,25 @@ export class WhatsAppControllerBridge {
       return;
     }
 
+    await this.stateStore.upsertSession(phoneKey, {
+      phoneKey,
+      lastThreadChoices: threads.map((thread) => ({
+        id: thread.id,
+        name: thread.name ?? null,
+        preview: sanitizeThreadPreview(thread.preview),
+        updatedAt: thread.updatedAt ?? null
+      })),
+      lastThreadChoicesAt: new Date().toISOString()
+    });
+
     const lines = [
       "Recent Codex sessions:",
       "",
-      ...threads.map((thread) => summarizeThread(thread, session.threadId ?? null)),
+      ...threads.map((thread, index) =>
+        summarizeThreadChoice(thread, session.threadId ?? null, index + 1)
+      ),
       "",
-      "Use /connect <thread-id-prefix> to switch this chat to one of these sessions."
+      "Use /1, /2, ..., /session <number>, or /connect <thread-id-prefix> to switch this chat."
     ];
     await this.sendReply(remoteJid, lines.join("\n"));
   }
@@ -1153,7 +1267,7 @@ export class WhatsAppControllerBridge {
     if (!token) {
       await this.sendReply(
         remoteJid,
-        "Usage: /connect <thread-id-prefix>\n\nUse /sessions to list recent Codex threads first."
+        "Usage: /session <number|thread-id-prefix>\n\nUse /sessions to list recent Codex threads first."
       );
       return;
     }
@@ -1167,9 +1281,21 @@ export class WhatsAppControllerBridge {
       search: config.search,
       limit: SESSION_CONNECT_SEARCH_LIMIT
     });
-    const resolution = resolveThreadSelection(threads, token);
+    const session = this.stateStore.data.sessions[phoneKey] ?? {};
+    const resolution = resolveThreadSelection(threads, token, session);
 
     if (!resolution.match) {
+      if (resolution.requestedShortcut) {
+        await this.sendReply(
+          remoteJid,
+          [
+            `No recent session matched shortcut ${formatThreadShortcut(resolution.requestedShortcut)}.`,
+            "Use /sessions to refresh the numbered list, or use /session <thread-id-prefix>."
+          ].join("\n")
+        );
+        return;
+      }
+
       if (!resolution.candidates.length) {
         await this.sendReply(
           remoteJid,
@@ -1190,7 +1316,6 @@ export class WhatsAppControllerBridge {
       return;
     }
 
-    const session = this.stateStore.data.sessions[phoneKey] ?? {};
     await this.stateStore.upsertSession(phoneKey, {
       ...session,
       phoneKey,
@@ -1321,7 +1446,7 @@ export class WhatsAppControllerBridge {
     if (!requestedLevel) {
       await this.sendReply(
         remoteJid,
-        "Unknown permission level. Use /permissions with read-only, workspace-write, or danger-full-access."
+        "Unknown permission level. Use /permissions with ro|ww|dfa or read-only|workspace-write|danger-full-access."
       );
       return;
     }

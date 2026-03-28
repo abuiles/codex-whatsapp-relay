@@ -32,15 +32,16 @@ Use this skill when the user wants to connect WhatsApp, inspect recent chats, re
    - send plain text to continue the current Codex session
    - send voice notes that are transcribed locally before continuing the current Codex session
    - receive outbound WhatsApp voice-note replies when voice reply mode is enabled for that chat
-   - send `/new` to start fresh
-   - send `/sessions` to list recent Codex threads
-   - send `/connect <thread-id-prefix>` to switch this chat to another Codex session
-   - send `/status` to inspect the active session
-   - send `/permissions` to inspect the current permission level
-   - send `/permissions read-only|workspace-write|danger-full-access` to change the session sandbox level
-   - send `/approve`, `/approve session`, `/deny`, or `/cancel` to answer pending approvals in `workspace-write`
-   - send `/stop` to cancel the in-flight Codex run
-   - send `/help` to see command help
+   - send `/new` or `/n` to start fresh
+   - send `/sessions` or `/ls` to list recent Codex threads
+   - send `/1`, `/2`, ... or `/session <number|thread-id-prefix>` or `/c <number|thread-id-prefix>` to switch this chat to another Codex session
+   - send `/status` or `/st` to inspect the active session
+   - send `/permissions` or `/p` to inspect the current permission level
+   - send `/voice` to inspect or change outbound voice-reply mode for that chat
+   - send `/permissions ro|ww|dfa` or `/permissions read-only|workspace-write|danger-full-access` to change the session sandbox level
+   - send `/approve` or `/a`, `/approve session`, `/deny` or `/d`, or `/cancel` or `/q` to answer pending approvals in `workspace-write`
+   - send `/stop` or `/x` to cancel the in-flight Codex run
+   - send `/help` or `/h` to see command help
 
    The bridge uses `codex app-server` under the hood so each allowed number maps to a native Codex thread that can be resumed across messages.
    `workspace-write` is the safe default because guarded command and file-change approvals can be answered from WhatsApp.

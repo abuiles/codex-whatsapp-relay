@@ -79,15 +79,15 @@ Once the controller bridge is running, allowed direct chats can send:
 
 - plain text to continue the current Codex session
 - voice notes to continue the current Codex session after local transcription
-- `/new` to start a fresh session
-- `/sessions` to list recent Codex threads
-- `/connect <thread-id-prefix>` to switch this chat to another Codex session
-- `/status` to inspect the active session
-- `/permissions` to inspect the current permission level
-- `/permissions read-only|workspace-write|danger-full-access` to change the session sandbox level
-- `/approve`, `/approve session`, `/deny`, and `/cancel` to answer pending approval prompts in `workspace-write`
-- `/stop` to cancel the in-flight Codex run
-- `/help` to see command help
+- `/new` or `/n` to start a fresh session
+- `/sessions` or `/ls` to list recent Codex threads
+- `/1`, `/2`, ... or `/session <number|thread-id-prefix>` or `/c <number|thread-id-prefix>` to switch this chat to another Codex session
+- `/status` or `/st` to inspect the active session
+- `/permissions` or `/p` to inspect the current permission level
+- `/permissions ro|ww|dfa` or `/permissions read-only|workspace-write|danger-full-access` to change the session sandbox level
+- `/approve` or `/a`, `/approve session`, `/deny` or `/d`, and `/cancel` or `/q` to answer pending approval prompts in `workspace-write`
+- `/stop` or `/x` to cancel the in-flight Codex run
+- `/help` or `/h` to see command help
 
 `danger-full-access` requires an explicit confirmation code sent back over WhatsApp before the bridge disables the sandbox for that chat session.
 Voice notes are transcribed locally with `mlx-community/parakeet-tdt-0.6b-v3` through `uvx` and `ffmpeg`. The bridge echoes the transcript back before acting on it, and very short low-confidence transcriptions are rejected so you can retry instead of sending garbage to Codex.
