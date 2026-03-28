@@ -72,7 +72,12 @@ async function probePythonVersion(command) {
 
 async function resolvePython() {
   const requested = String(process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_INSTALL_PYTHON ?? "").trim();
-  const candidates = [requested, "python3.11", "python3"].filter(Boolean);
+  const candidates = [
+    requested,
+    path.join(process.env.HOME ?? "", ".local", "bin", "python3.11"),
+    "python3.11",
+    "python3"
+  ].filter(Boolean);
   const matches = [];
 
   for (const candidate of candidates) {
