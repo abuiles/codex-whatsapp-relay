@@ -5,6 +5,7 @@ import {
   buildSpokenReplyText,
   detectSpeechLanguageId,
   detectSpeechLocale,
+  normalizeSpeechLanguageId,
   normalizeTtsProvider,
   normalizeVoiceReplySpeed,
   resolveEffectiveTtsProvider
@@ -51,10 +52,10 @@ test("buildSpokenReplyText keeps spanish output suitable for voice synthesis", (
   assert.match(spoken, /espanol/i);
 });
 
-test("detectSpeechLocale distinguishes English, Spanish, and other languages conservatively", () => {
+test("detectSpeechLocale returns supported language ids when local detection can infer them", () => {
   assert.equal(detectSpeechLocale("Please give me the short answer in voice."), "en");
   assert.equal(detectSpeechLocale("Claro, te doy el resumen corto ahora."), "es");
-  assert.equal(detectSpeechLocale("Bonjour, je peux te faire un resume rapide."), "other");
+  assert.equal(detectSpeechLocale("Bonjour, je peux te faire un resume rapide."), "fr");
 });
 
 test("detectSpeechLanguageId recognizes supported languages for Chatterbox routing", () => {
@@ -68,6 +69,14 @@ test("detectSpeechLanguageId recognizes supported languages for Chatterbox routi
     ),
     "fr"
   );
+});
+
+test("normalizeSpeechLanguageId accepts Codex hints and BCP 47 variants", () => {
+  assert.equal(normalizeSpeechLanguageId("es"), "es");
+  assert.equal(normalizeSpeechLanguageId("pt-BR"), "pt");
+  assert.equal(normalizeSpeechLanguageId("eng"), "en");
+  assert.equal(normalizeSpeechLanguageId("iw"), "he");
+  assert.equal(normalizeSpeechLanguageId(""), null);
 });
 
 test("resolveEffectiveTtsProvider keeps Chatterbox on for supported multilingual replies by default", () => {

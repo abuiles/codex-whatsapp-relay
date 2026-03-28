@@ -37,6 +37,8 @@ const THREAD_SHORTCUT_TTL_MS = 30 * 60_000;
 const DANGER_CONFIRMATION_WINDOW_MS = 60_000;
 const VOICE_REPLY_SPEEDS = new Set(["1x", "2x"]);
 const LOGGED_OUT_RECOVERY_MS = 60_000;
+const VOICE_REPLY_LANGUAGE_TAG =
+  /^\s*\[\[reply_language:([a-z]{2,3}(?:[-_][a-z0-9]{2,8})?)\]\]\s*/i;
 
 function invalidControllerCommandError(message) {
   const error = new Error(message);
@@ -300,11 +302,40 @@ export function buildVoiceReplyPrompt(prompt) {
     "Delivery note for the assistant:",
     "- Your final answer will be converted into a WhatsApp voice note.",
     "- Reply in the same language as the user.",
+    "- Start your final answer with a single metadata line exactly like [[reply_language:es]].",
+    "- Use the language code for the language you are actually replying in.",
+    "- Put the real answer after that metadata line and do not mention the metadata.",
     "- Write in plain, natural prose that sounds good when spoken aloud.",
     "- If the answer is short, give the full answer.",
     "- If it would be long, give a concise spoken summary with the key takeaway first.",
     "- Avoid markdown tables, code fences, raw URLs, and long literal lists unless the user explicitly asks for exact text."
   ].join("\n");
+}
+
+export function extractVoiceReplyEnvelope(text) {
+  const source = String(text ?? "").trim();
+  if (!source) {
+    return {
+      text: "",
+      languageId: null
+    };
+  }
+
+  const match = source.match(VOICE_REPLY_LANGUAGE_TAG);
+  if (!match) {
+    return {
+      text: source,
+      languageId: null
+    };
+  }
+
+  const stripped = source.slice(match[0].length).trim();
+  return {
+    text: stripped || source,
+    languageId: String(match[1] ?? "")
+      .trim()
+      .toLowerCase() || null
+  };
 }
 
 function parseThreadShortcutIndex(value) {
@@ -1717,6 +1748,8 @@ export class WhatsAppControllerBridge {
     try {
       const result = await resultPromise;
       this.activeRuns.delete(phoneKey);
+      const replyEnvelope = extractVoiceReplyEnvelope(result.replyText);
+      const replyText = replyEnvelope.text || result.replyText;
 
       await this.stateStore.upsertSession(phoneKey, {
         ...(this.stateStore.data.sessions[phoneKey] ?? {}),
@@ -1726,13 +1759,18 @@ export class WhatsAppControllerBridge {
         threadId: result.threadId,
         pendingApproval: null,
         lastReplyAt: new Date().toISOString(),
-        lastReplyPreview: result.replyText.slice(0, 200),
+        lastReplyPreview: replyText.slice(0, 200),
         lastReplyVoiceReply: activeVoiceReply.enabled ? activeVoiceReply : null
       });
 
       if (activeVoiceReply.enabled) {
         try {
-          await this.sendVoiceReply(remoteJid, result.replyText, activeVoiceReply);
+          await this.sendVoiceReply(
+            remoteJid,
+            replyText,
+            activeVoiceReply,
+            replyEnvelope.languageId
+          );
         } catch (error) {
           await this.sendReply(
             remoteJid,
@@ -1743,7 +1781,7 @@ export class WhatsAppControllerBridge {
             [
               `Session ${shortThreadId(result.threadId)}:`,
               "",
-              result.replyText
+              replyText
             ].join("\n")
           );
         }
@@ -1755,7 +1793,7 @@ export class WhatsAppControllerBridge {
         [
           `Session ${shortThreadId(result.threadId)}:`,
           "",
-          result.replyText
+          replyText
         ].join("\n")
       );
     } catch (error) {
@@ -1785,10 +1823,11 @@ export class WhatsAppControllerBridge {
     await this.sendTextMessage(remoteJid, text);
   }
 
-  async sendVoiceReply(remoteJid, text, voiceReply) {
+  async sendVoiceReply(remoteJid, text, voiceReply, languageIdHint = null) {
     const synthesized = await synthesizeVoiceReply({
       text,
-      speed: voiceReply?.speed
+      speed: voiceReply?.speed,
+      languageIdHint
     });
     await this.sendVoiceNoteMessage(remoteJid, synthesized.audioBuffer, {
       mimetype: synthesized.mimetype,

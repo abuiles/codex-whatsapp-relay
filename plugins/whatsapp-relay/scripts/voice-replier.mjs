@@ -58,6 +58,14 @@ const CHATTERBOX_FRANC_LANGUAGE_IDS = new Map([
   ["tur", "tr"],
   ["zho", "zh"]
 ]);
+const CHATTERBOX_SUPPORTED_LANGUAGE_IDS = new Set(CHATTERBOX_FRANC_LANGUAGE_IDS.values());
+const CHATTERBOX_LANGUAGE_ALIASES = new Map([
+  ...CHATTERBOX_FRANC_LANGUAGE_IDS.entries(),
+  ...[...CHATTERBOX_SUPPORTED_LANGUAGE_IDS].map((languageId) => [languageId, languageId]),
+  ["iw", "he"],
+  ["nb", "no"],
+  ["nn", "no"]
+]);
 
 let voiceCachePromise = null;
 
@@ -131,14 +139,6 @@ export function resolveEffectiveTtsProvider(provider, languageId) {
   }
 
   return normalizedProvider;
-}
-
-function normalizeLocaleSample(text) {
-  return ` ${String(text ?? "")
-    .toLowerCase()
-    .replace(/[?!.,;:()[\]{}"'`]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()} `;
 }
 
 function summarizeCommand(command, args) {
@@ -224,124 +224,26 @@ async function runCommand(command, args, { timeoutMs, cwd, env } = {}) {
   });
 }
 
-function looksSpanish(text) {
-  const lower = normalizeLocaleSample(text);
-  const accents = /[áéíóúñ¿¡]/.test(lower);
-  const spanishMarkers = [
-    " el ",
-    " la ",
-    " los ",
-    " las ",
-    " que ",
-    " para ",
-    " con ",
-    " por ",
-    " una ",
-    " este ",
-    " esta ",
-    " puedes ",
-    " ahora "
-  ];
-  const markerHits = spanishMarkers.filter((marker) => lower.includes(marker)).length;
-  return accents || markerHits >= 2;
-}
+export function normalizeSpeechLanguageId(value) {
+  const raw = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  if (!raw) {
+    return null;
+  }
 
-function looksEnglish(text) {
-  const lower = normalizeLocaleSample(text);
-  const englishMarkers = [
-    " the ",
-    " and ",
-    " you ",
-    " your ",
-    " this ",
-    " that ",
-    " with ",
-    " for ",
-    " from ",
-    " what ",
-    " how ",
-    " can ",
-    " could ",
-    " would ",
-    " should ",
-    " reply ",
-    " voice ",
-    " summary ",
-    " short ",
-    " answer ",
-    " thanks ",
-    " please ",
-    " hello ",
-    " hi ",
-    " i ",
-    " we ",
-    " it ",
-    " is ",
-    " are "
-  ];
+  const normalized = raw.replace(/_/g, "-");
+  const direct = CHATTERBOX_LANGUAGE_ALIASES.get(normalized);
+  if (direct) {
+    return direct;
+  }
 
-  return englishMarkers.filter((marker) => lower.includes(marker)).length >= 2;
-}
-
-function looksPortuguese(text) {
-  const lower = normalizeLocaleSample(text);
-  const accents = /[ãõçêôáéíóú]/.test(lower);
-  const portugueseMarkers = [
-    " voce ",
-    " você ",
-    " nao ",
-    " não ",
-    " com ",
-    " para ",
-    " uma ",
-    " agora ",
-    " resumo ",
-    " curto ",
-    " obrigado ",
-    " obrigada ",
-    " posso "
-  ];
-  return accents || portugueseMarkers.filter((marker) => lower.includes(marker)).length >= 2;
-}
-
-function looksItalian(text) {
-  const lower = normalizeLocaleSample(text);
-  const accents = /[àèìòù]/.test(lower);
-  const italianMarkers = [
-    " che ",
-    " con ",
-    " per ",
-    " una ",
-    " adesso ",
-    " riassunto ",
-    " breve ",
-    " grazie ",
-    " posso ",
-    " allora ",
-    " questo ",
-    " quello "
-  ];
-  return accents || italianMarkers.filter((marker) => lower.includes(marker)).length >= 2;
+  const base = normalized.split("-")[0];
+  return CHATTERBOX_LANGUAGE_ALIASES.get(base) ?? null;
 }
 
 export function detectSpeechLocale(text) {
-  if (looksSpanish(text)) {
-    return "es";
-  }
-
-  if (looksPortuguese(text)) {
-    return "pt";
-  }
-
-  if (looksItalian(text)) {
-    return "it";
-  }
-
-  if (looksEnglish(text)) {
-    return "en";
-  }
-
-  return "other";
+  return detectSpeechLanguageId(text) ?? "other";
 }
 
 export function detectSpeechLanguageId(text) {
@@ -350,16 +252,11 @@ export function detectSpeechLanguageId(text) {
     return null;
   }
 
-  const locale = detectSpeechLocale(sample);
-  if (locale !== "other") {
-    return locale;
-  }
-
   const detected = franc(sample, {
     minLength: 10,
     only: [...CHATTERBOX_FRANC_LANGUAGE_IDS.keys()]
   });
-  return CHATTERBOX_FRANC_LANGUAGE_IDS.get(detected) ?? null;
+  return normalizeSpeechLanguageId(detected);
 }
 
 async function listSystemVoices() {
@@ -788,14 +685,16 @@ export async function synthesizeVoiceReply({
   text,
   speed = DEFAULT_VOICE_REPLY_SPEED,
   timeoutMs = DEFAULT_TIMEOUT_MS,
-  provider = DEFAULT_TTS_PROVIDER
+  provider = DEFAULT_TTS_PROVIDER,
+  languageIdHint = null
 }) {
   const spokenText = buildSpokenReplyText(text);
   if (!spokenText) {
     throw new Error("Voice reply text is empty.");
   }
 
-  const languageId = detectSpeechLanguageId(spokenText);
+  const languageId =
+    normalizeSpeechLanguageId(languageIdHint) ?? detectSpeechLanguageId(spokenText);
   const locale = languageId ?? detectSpeechLocale(spokenText);
   const normalizedProvider = resolveEffectiveTtsProvider(provider, languageId);
 
