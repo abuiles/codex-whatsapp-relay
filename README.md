@@ -167,6 +167,13 @@ WHATSAPP_RELAY_TTS_PROVIDER=chatterbox-turbo \
 npm run whatsapp:tts:smoke -- --provider chatterbox-turbo --text "Testing Chatterbox Turbo locally."
 ```
 
+To force the multilingual route during a smoke test, pass a language hint:
+
+```bash
+WHATSAPP_RELAY_TTS_PROVIDER=chatterbox-turbo \
+npm run whatsapp:tts:smoke -- --provider chatterbox-turbo --language-id es --text "Claro, te doy el resumen corto ahora."
+```
+
 The Chatterbox path is slower than `say` because the Python process and model are loaded locally for each generated reply. It is now the preferred provider. English uses Turbo, while supported non-English replies route through the multilingual model. If you prefer the lighter macOS voice path everywhere, set `WHATSAPP_RELAY_TTS_PROVIDER=system`. If you only want the macOS fallback for non-English replies, set `WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH=0`. On machines where Perth's native implicit watermarker is unavailable, the helper falls back to Perth's dummy watermarker so local synthesis still works.
 
 ## CLI Fallback

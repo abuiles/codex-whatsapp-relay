@@ -123,7 +123,7 @@ async function main() {
     throw lastError ?? new Error("Could not create a Chatterbox virtual environment.");
   }
 
-  console.log(`Using ${python.command} (${python.version}) for Chatterbox Turbo setup.`);
+  console.log(`Using ${python.command} (${python.version}) for Chatterbox setup.`);
   await runCommand(
     venvPython,
     ["-m", "pip", "install", "--upgrade", "pip", "wheel", "setuptools<81"],
@@ -141,9 +141,12 @@ async function main() {
     [
       "import importlib.metadata",
       "import torch",
+      "from chatterbox.mtl_tts import ChatterboxMultilingualTTS, SUPPORTED_LANGUAGES",
       "from chatterbox.tts_turbo import ChatterboxTurboTTS",
       "print(f'chatterbox={importlib.metadata.version(\"chatterbox-tts\")}')",
       "print('tts_turbo=ok')",
+      "print('tts_multilingual=ok')",
+      "print(f'multilingual_languages={len(SUPPORTED_LANGUAGES)}')",
       "print(f'torch={torch.__version__}')",
     ].join("; ")
   ], {

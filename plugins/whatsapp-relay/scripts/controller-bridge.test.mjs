@@ -178,12 +178,30 @@ test("extractVoiceReplyEnvelope strips the language tag before delivery", () => 
     extractVoiceReplyEnvelope("[[reply_language:pt-BR]]\nClaro, eu te dou o resumo curto agora."),
     {
       text: "Claro, eu te dou o resumo curto agora.",
-      languageId: "pt-br"
+      languageId: "pt-br",
+      hasLanguageTag: true
     }
   );
   assert.deepEqual(extractVoiceReplyEnvelope("Plain reply"), {
     text: "Plain reply",
-    languageId: null
+    languageId: null,
+    hasLanguageTag: false
+  });
+});
+
+test("extractVoiceReplyEnvelope tolerates whitespace and never falls back to the raw tag", () => {
+  assert.deepEqual(
+    extractVoiceReplyEnvelope(" \n [[ reply_language : es ]] \n Hola."),
+    {
+      text: "Hola.",
+      languageId: "es",
+      hasLanguageTag: true
+    }
+  );
+  assert.deepEqual(extractVoiceReplyEnvelope("[[reply_language:it]]"), {
+    text: "",
+    languageId: "it",
+    hasLanguageTag: true
   });
 });
 

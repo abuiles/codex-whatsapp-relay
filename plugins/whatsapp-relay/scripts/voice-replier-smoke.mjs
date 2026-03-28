@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   DEFAULT_TTS_PROVIDER,
   DEFAULT_VOICE_REPLY_SPEED,
+  normalizeSpeechLanguageId,
   normalizeTtsProvider,
   normalizeVoiceReplySpeed,
   synthesizeVoiceReply
@@ -15,7 +16,8 @@ function parseArgs(argv) {
     text: "Testing local voice replies.",
     output: "",
     provider: DEFAULT_TTS_PROVIDER,
-    speed: DEFAULT_VOICE_REPLY_SPEED
+    speed: DEFAULT_VOICE_REPLY_SPEED,
+    languageId: null
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -47,6 +49,13 @@ function parseArgs(argv) {
           index += 1;
         }
         break;
+      case "--language-id":
+      case "--lang":
+        if (value) {
+          args.languageId = value;
+          index += 1;
+        }
+        break;
       default:
         break;
     }
@@ -56,7 +65,8 @@ function parseArgs(argv) {
     text: args.text,
     output: args.output,
     provider: normalizeTtsProvider(args.provider, DEFAULT_TTS_PROVIDER),
-    speed: normalizeVoiceReplySpeed(args.speed, DEFAULT_VOICE_REPLY_SPEED)
+    speed: normalizeVoiceReplySpeed(args.speed, DEFAULT_VOICE_REPLY_SPEED),
+    languageId: normalizeSpeechLanguageId(args.languageId)
   };
 }
 
@@ -65,7 +75,8 @@ async function main() {
   const synthesized = await synthesizeVoiceReply({
     text: options.text,
     provider: options.provider,
-    speed: options.speed
+    speed: options.speed,
+    languageIdHint: options.languageId
   });
   const outputFile =
     options.output ||
@@ -78,6 +89,7 @@ async function main() {
         provider: synthesized.provider,
         speed: synthesized.speed,
         locale: synthesized.locale,
+        languageId: synthesized.languageId ?? options.languageId ?? null,
         voice: synthesized.voice,
         seconds: synthesized.seconds,
         outputFile

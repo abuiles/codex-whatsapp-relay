@@ -9,6 +9,33 @@ function digitsOnly(value) {
   return String(value ?? "").replace(/\D+/g, "");
 }
 
+function normalizeBooleanish(value, fallback) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  if (!normalized) {
+    return fallback;
+  }
+
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+
+  return fallback;
+}
+
 export function normalizeControllerNumber(value) {
   const phoneKey = digitsOnly(value);
   if (!phoneKey) {
@@ -81,7 +108,10 @@ function normalizeConfig(config = {}) {
   delete merged.fullAuto;
   merged.permissionLevel = resolvePermissionLevel(merged.permissionLevel);
   merged.ttsProvider = normalizeTtsProvider(merged.ttsProvider, "chatterbox-turbo");
-  merged.ttsChatterboxAllowNonEnglish = merged.ttsChatterboxAllowNonEnglish !== false;
+  merged.ttsChatterboxAllowNonEnglish = normalizeBooleanish(
+    merged.ttsChatterboxAllowNonEnglish,
+    true
+  );
 
   const seen = new Set();
   merged.allowedControllers = (merged.allowedControllers ?? [])

@@ -38,7 +38,7 @@ const DANGER_CONFIRMATION_WINDOW_MS = 60_000;
 const VOICE_REPLY_SPEEDS = new Set(["1x", "2x"]);
 const LOGGED_OUT_RECOVERY_MS = 60_000;
 const VOICE_REPLY_LANGUAGE_TAG =
-  /^\s*\[\[reply_language:([a-z]{2,3}(?:[-_][a-z0-9]{2,8})?)\]\]\s*/i;
+  /^\s*\[\[\s*reply_language\s*:\s*([a-z]{2,3}(?:[-_][a-z0-9]{2,8})?)\s*\]\]\s*/i;
 
 function invalidControllerCommandError(message) {
   const error = new Error(message);
@@ -317,7 +317,8 @@ export function extractVoiceReplyEnvelope(text) {
   if (!source) {
     return {
       text: "",
-      languageId: null
+      languageId: null,
+      hasLanguageTag: false
     };
   }
 
@@ -325,16 +326,18 @@ export function extractVoiceReplyEnvelope(text) {
   if (!match) {
     return {
       text: source,
-      languageId: null
+      languageId: null,
+      hasLanguageTag: false
     };
   }
 
   const stripped = source.slice(match[0].length).trim();
   return {
-    text: stripped || source,
+    text: stripped,
     languageId: String(match[1] ?? "")
       .trim()
-      .toLowerCase() || null
+      .toLowerCase() || null,
+    hasLanguageTag: true
   };
 }
 
@@ -1749,7 +1752,12 @@ export class WhatsAppControllerBridge {
       const result = await resultPromise;
       this.activeRuns.delete(phoneKey);
       const replyEnvelope = extractVoiceReplyEnvelope(result.replyText);
-      const replyText = replyEnvelope.text || result.replyText;
+      const replyText =
+        replyEnvelope.text || (replyEnvelope.hasLanguageTag ? "" : result.replyText);
+
+      if (!replyText) {
+        throw new Error("Codex returned an empty reply.");
+      }
 
       await this.stateStore.upsertSession(phoneKey, {
         ...(this.stateStore.data.sessions[phoneKey] ?? {}),
