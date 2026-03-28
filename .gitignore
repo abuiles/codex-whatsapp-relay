@@ -11,3 +11,4 @@ plugins/whatsapp-relay/data/store.json
 plugins/whatsapp-relay/data/runtime.json
 
 npm-debug.log*
+.worktrees
