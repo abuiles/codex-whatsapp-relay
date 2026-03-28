@@ -132,16 +132,15 @@ The first voice note can be noticeably slower because `uvx` may need to install 
 
 Outbound voice replies are also local-first.
 
-The default provider is macOS `say`, which is fast to set up and works well for short spoken replies. If you want a neural local voice, the bridge can also run `ResembleAI/chatterbox-turbo` through a dedicated Python environment.
+The default provider is `ResembleAI/chatterbox-turbo`, so WhatsApp voice replies use the neural local voice path unless you explicitly opt back into macOS `say`.
 
 Provider selection is controlled with environment variables:
 
-- `WHATSAPP_RELAY_TTS_PROVIDER=system` keeps the default macOS `say` path.
-- `WHATSAPP_RELAY_TTS_PROVIDER=chatterbox-turbo` switches outbound voice replies to `ResembleAI/chatterbox-turbo`.
+- `WHATSAPP_RELAY_TTS_PROVIDER=system` opts out of Chatterbox and uses the macOS `say` fallback.
+- `WHATSAPP_RELAY_TTS_PROVIDER=chatterbox-turbo` explicitly keeps outbound voice replies on `ResembleAI/chatterbox-turbo`.
 - `WHATSAPP_RELAY_TTS_CHATTERBOX_PYTHON` overrides the Python interpreter used for Chatterbox. By default the bridge looks for `plugins/whatsapp-relay/.venv-chatterbox/bin/python`.
 - `WHATSAPP_RELAY_TTS_CHATTERBOX_DEVICE=auto|mps|cpu` controls the Chatterbox device selection. `auto` is the default.
 - `WHATSAPP_RELAY_TTS_CHATTERBOX_AUDIO_PROMPT=/absolute/path/to/reference.wav` optionally enables voice cloning for Chatterbox with a local reference clip.
-- `WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH=1` disables the default system fallback for non-English replies. By default Turbo is treated as English-first and the bridge falls back to macOS `say` for replies that look Spanish.
 - `WHATSAPP_RELAY_TTS_TIMEOUT_MS` extends or reduces the outbound TTS timeout for either provider.
 
 If you want the controller bridge to keep using Chatterbox across restarts, persist it in the bridge config. `whatsapp_start_controller_bridge` accepts `ttsProvider` and `ttsChatterboxAllowNonEnglish`, stores them in `plugins/whatsapp-relay/data/controller-config.json`, and reuses them for future daemon starts.
@@ -167,7 +166,7 @@ WHATSAPP_RELAY_TTS_PROVIDER=chatterbox-turbo \
 npm run whatsapp:tts:smoke -- --provider chatterbox-turbo --text "Testing Chatterbox Turbo locally."
 ```
 
-The Chatterbox path is slower than `say` because the Python process and model are loaded locally for each generated reply. It is an optional local provider, not the default. The first run is also noticeably slower because model weights are downloaded into the local Hugging Face cache. On machines where Perth's native implicit watermarker is unavailable, the helper falls back to Perth's dummy watermarker so local synthesis still works.
+The Chatterbox path is slower than `say` because the Python process and model are loaded locally for each generated reply. It is now the default provider. The first run is also noticeably slower because model weights are downloaded into the local Hugging Face cache. If you prefer the lighter macOS voice path, set `WHATSAPP_RELAY_TTS_PROVIDER=system`. On machines where Perth's native implicit watermarker is unavailable, the helper falls back to Perth's dummy watermarker so local synthesis still works.
 
 ## CLI Fallback
 

@@ -153,8 +153,9 @@ async function main() {
   console.log("");
   console.log("Chatterbox Turbo is installed locally.");
   console.log(`Python: ${venvPython}`);
-  console.log("To enable it for outbound voice replies:");
-  console.log("export WHATSAPP_RELAY_TTS_PROVIDER=chatterbox-turbo");
+  console.log("Outbound voice replies now use Chatterbox Turbo by default.");
+  console.log("If you ever want the macOS fallback instead:");
+  console.log("export WHATSAPP_RELAY_TTS_PROVIDER=system");
 }
 
 main().catch((error) => {

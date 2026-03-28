@@ -47,7 +47,7 @@ Use this skill when the user wants to connect WhatsApp, inspect recent chats, re
    `workspace-write` is the safe default because guarded command and file-change approvals can be answered from WhatsApp.
    `danger-full-access` requires an explicit confirmation code from the chat before the bridge disables sandboxing for that session.
    Voice notes are transcribed locally with Parakeet v3 via `uvx` and `ffmpeg`, and short low-confidence transcripts are rejected so the chat can retry instead of sending a bad prompt to Codex.
-   Outbound voice replies are synthesized locally. The default provider is macOS `say`, and `ResembleAI/chatterbox-turbo` can be installed as an optional local provider for richer speech.
+   Outbound voice replies are synthesized locally. The default provider is `ResembleAI/chatterbox-turbo`, and macOS `say` remains available as an explicit fallback if you opt out of Chatterbox.
    While the bridge is running, treat it as the sole owner of the live WhatsApp session. Prefer cached reads from MCP tools and route outbound messages through the bridge instead of reconnecting a second socket.
    If the allowed controller is the same WhatsApp account linked to the plugin, the self chat can be used as the control surface and should be treated as a valid source of prompts.
 
