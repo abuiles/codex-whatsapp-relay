@@ -37,6 +37,13 @@ const DANGER_CONFIRMATION_WINDOW_MS = 60_000;
 const VOICE_REPLY_SPEEDS = new Set(["1x", "2x"]);
 const LOGGED_OUT_RECOVERY_MS = 60_000;
 
+function invalidControllerCommandError(message) {
+  const error = new Error(message);
+  error.code = "ERR_CONTROLLER_COMMAND_INVALID";
+  error.retryable = false;
+  return error;
+}
+
 function normalizeTimestamp(value) {
   if (value === undefined || value === null) {
     return null;
@@ -416,9 +423,19 @@ export function parseVoiceTranscript(transcript, captureAllDirectMessages = true
     return { type: "ignored" };
   }
 
+  const prompt = String(transcript ?? "").trim();
+  const oneShotVoiceReply = extractOneShotVoiceReplyRequest(prompt);
+  if (oneShotVoiceReply) {
+    return {
+      type: "prompt",
+      prompt: oneShotVoiceReply.prompt,
+      voiceReply: oneShotVoiceReply.voiceReply
+    };
+  }
+
   return {
     type: "prompt",
-    prompt: String(transcript ?? "").trim()
+    prompt
   };
 }
 
@@ -766,10 +783,22 @@ export class WhatsAppControllerBridge {
   async handleOutboxCommand(command = {}) {
     switch (command.type) {
       case "send_message":
+        if (!command?.payload?.chatId) {
+          throw invalidControllerCommandError(
+            "Controller send_message command is missing payload.chatId."
+          );
+        }
+        if (typeof command?.payload?.text !== "string" || !command.payload.text.trim()) {
+          throw invalidControllerCommandError(
+            "Controller send_message command is missing payload.text."
+          );
+        }
         await this.sendTextMessage(command.payload.chatId, command.payload.text);
         return;
       default:
-        throw new Error(`Unknown controller command type: ${command.type}`);
+        throw invalidControllerCommandError(
+          `Unknown controller command type: ${command.type}`
+        );
     }
   }
 

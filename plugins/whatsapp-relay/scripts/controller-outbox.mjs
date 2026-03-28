@@ -23,6 +23,18 @@ function errorSummary(error) {
   };
 }
 
+function isRetryableControllerCommandError(error) {
+  if (error?.retryable === true) {
+    return true;
+  }
+
+  if (error?.retryable === false || error?.permanent === true) {
+    return false;
+  }
+
+  return error?.code !== "ERR_CONTROLLER_COMMAND_INVALID";
+}
+
 async function quarantineFailedCommand(command, error, failedDir) {
   const failedCommand = {
     ...command,
@@ -102,9 +114,14 @@ export async function drainControllerCommands(
 
     try {
       await handler(command);
+      await fs.unlink(filePath).catch(() => {});
     } catch (error) {
+      if (isRetryableControllerCommandError(error)) {
+        break;
+      }
+
       await quarantineFailedCommand(command, error, failedDir);
+      await fs.unlink(filePath).catch(() => {});
     }
-    await fs.unlink(filePath).catch(() => {});
   }
 }

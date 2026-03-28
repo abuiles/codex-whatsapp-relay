@@ -85,7 +85,7 @@ function normalizeChatterboxDevice(value, fallback = "auto") {
   return fallback;
 }
 
-function resolveEffectiveTtsProvider(provider, locale) {
+export function resolveEffectiveTtsProvider(provider, locale) {
   const normalizedProvider = normalizeTtsProvider(provider, DEFAULT_TTS_PROVIDER);
   if (
     normalizedProvider === "chatterbox-turbo" &&
@@ -96,6 +96,14 @@ function resolveEffectiveTtsProvider(provider, locale) {
   }
 
   return normalizedProvider;
+}
+
+function normalizeLocaleSample(text) {
+  return ` ${String(text ?? "")
+    .toLowerCase()
+    .replace(/[?!.,;:()[\]{}"'`]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()} `;
 }
 
 function summarizeCommand(command, args) {
@@ -182,7 +190,7 @@ async function runCommand(command, args, { timeoutMs, cwd, env } = {}) {
 }
 
 function looksSpanish(text) {
-  const lower = String(text ?? "").toLowerCase();
+  const lower = normalizeLocaleSample(text);
   const accents = /[áéíóúñ¿¡]/.test(lower);
   const spanishMarkers = [
     " el ",
@@ -199,11 +207,57 @@ function looksSpanish(text) {
     " puedes ",
     " ahora "
   ];
-  return accents || spanishMarkers.some((marker) => lower.includes(marker));
+  const markerHits = spanishMarkers.filter((marker) => lower.includes(marker)).length;
+  return accents || markerHits >= 2;
 }
 
-function detectSpeechLocale(text) {
-  return looksSpanish(text) ? "es" : "en";
+function looksEnglish(text) {
+  const lower = normalizeLocaleSample(text);
+  const englishMarkers = [
+    " the ",
+    " and ",
+    " you ",
+    " your ",
+    " this ",
+    " that ",
+    " with ",
+    " for ",
+    " from ",
+    " what ",
+    " how ",
+    " can ",
+    " could ",
+    " would ",
+    " should ",
+    " reply ",
+    " voice ",
+    " summary ",
+    " short ",
+    " answer ",
+    " thanks ",
+    " please ",
+    " hello ",
+    " hi ",
+    " i ",
+    " we ",
+    " it ",
+    " is ",
+    " are "
+  ];
+
+  return englishMarkers.filter((marker) => lower.includes(marker)).length >= 2;
+}
+
+export function detectSpeechLocale(text) {
+  if (looksSpanish(text)) {
+    return "es";
+  }
+
+  if (looksEnglish(text)) {
+    return "en";
+  }
+
+  return "other";
 }
 
 async function listSystemVoices() {
@@ -248,7 +302,6 @@ function preferredVoiceNamesForLocale(locale) {
         "Monica"
       ].filter(Boolean);
     case "en":
-    default:
       return [
         process.env.WHATSAPP_RELAY_TTS_VOICE_EN,
         "Eddy (English (US))",
@@ -260,6 +313,8 @@ function preferredVoiceNamesForLocale(locale) {
         "Albert",
         "Daniel"
       ].filter(Boolean);
+    default:
+      return [];
   }
 }
 
@@ -279,6 +334,10 @@ async function resolveVoiceName(locale) {
     if (voices.some((voice) => voice.name === name)) {
       return name;
     }
+  }
+
+  if (locale !== "es" && locale !== "en") {
+    return null;
   }
 
   const exactLocale = locale === "es" ? "es_MX" : "en_US";
@@ -407,11 +466,16 @@ export function buildSpokenReplyText(text) {
   }
 
   const clipped = clipAtSentenceBoundary(cleaned, MAX_SPOKEN_REPLY_CHARS);
-  if (looksSpanish(cleaned)) {
+  const locale = detectSpeechLocale(cleaned);
+  if (locale === "es") {
     return `${clipped} Si quieres, te doy mas detalle en otro mensaje.`;
   }
 
-  return `${clipped} If you want, I can give more detail in another message.`;
+  if (locale === "en") {
+    return `${clipped} If you want, I can give more detail in another message.`;
+  }
+
+  return clipped;
 }
 
 function ffmpegArgs({ inputFile, outputFile, speed }) {

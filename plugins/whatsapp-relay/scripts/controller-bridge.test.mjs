@@ -36,6 +36,20 @@ test("parseVoiceTranscript respects captureAllDirectMessages when no voice comma
   });
 });
 
+test("parseVoiceTranscript extracts one-shot voice replies from spoken prompts", () => {
+  assert.deepEqual(
+    parseVoiceTranscript("reply in voice at 2x explain what changed in this PR"),
+    {
+      type: "prompt",
+      prompt: "explain what changed in this PR",
+      voiceReply: {
+        enabled: true,
+        speed: "2x"
+      }
+    }
+  );
+});
+
 test("parseVoiceReplyCommandPayload parses status and speed controls", () => {
   assert.deepEqual(parseVoiceReplyCommandPayload(""), { action: "status" });
   assert.deepEqual(parseVoiceReplyCommandPayload("on"), {
