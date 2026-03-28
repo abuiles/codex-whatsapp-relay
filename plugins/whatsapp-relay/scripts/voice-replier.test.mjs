@@ -56,9 +56,36 @@ test("detectSpeechLocale distinguishes English, Spanish, and other languages con
   assert.equal(detectSpeechLocale("Bonjour, je peux te faire un resume rapide."), "other");
 });
 
-test("resolveEffectiveTtsProvider keeps Chatterbox enabled across locales", () => {
-  assert.equal(resolveEffectiveTtsProvider("chatterbox-turbo", "en"), "chatterbox-turbo");
-  assert.equal(resolveEffectiveTtsProvider("chatterbox-turbo", "es"), "chatterbox-turbo");
-  assert.equal(resolveEffectiveTtsProvider("chatterbox-turbo", "other"), "chatterbox-turbo");
-  assert.equal(resolveEffectiveTtsProvider("system", "es"), "system");
+test("resolveEffectiveTtsProvider falls back for non-English Chatterbox replies by default", () => {
+  const previous = process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH;
+  delete process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH;
+
+  try {
+    assert.equal(resolveEffectiveTtsProvider("chatterbox-turbo", "en"), "chatterbox-turbo");
+    assert.equal(resolveEffectiveTtsProvider("chatterbox-turbo", "es"), "system");
+    assert.equal(resolveEffectiveTtsProvider("chatterbox-turbo", "other"), "system");
+    assert.equal(resolveEffectiveTtsProvider("system", "es"), "system");
+  } finally {
+    if (previous === undefined) {
+      delete process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH;
+    } else {
+      process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH = previous;
+    }
+  }
+});
+
+test("resolveEffectiveTtsProvider allows non-English Chatterbox replies when explicitly enabled", () => {
+  const previous = process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH;
+  process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH = "1";
+
+  try {
+    assert.equal(resolveEffectiveTtsProvider("chatterbox-turbo", "es"), "chatterbox-turbo");
+    assert.equal(resolveEffectiveTtsProvider("chatterbox-turbo", "other"), "chatterbox-turbo");
+  } finally {
+    if (previous === undefined) {
+      delete process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH;
+    } else {
+      process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH = previous;
+    }
+  }
 });

@@ -66,7 +66,7 @@ function defaultConfig() {
     permissionLevel: "workspace-write",
     search: false,
     captureAllDirectMessages: true,
-    ttsProvider: "system",
+    ttsProvider: "chatterbox-turbo",
     ttsChatterboxAllowNonEnglish: false,
     allowedControllers: []
   };
@@ -80,7 +80,7 @@ function normalizeConfig(config = {}) {
 
   delete merged.fullAuto;
   merged.permissionLevel = resolvePermissionLevel(merged.permissionLevel);
-  merged.ttsProvider = normalizeTtsProvider(merged.ttsProvider, "system");
+  merged.ttsProvider = normalizeTtsProvider(merged.ttsProvider, "chatterbox-turbo");
   merged.ttsChatterboxAllowNonEnglish = merged.ttsChatterboxAllowNonEnglish === true;
 
   const seen = new Set();
