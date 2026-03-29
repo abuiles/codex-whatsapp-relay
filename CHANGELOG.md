@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-03-29
+
+### Added
+
+- Multi-project WhatsApp controller support, including sticky per-project sessions, `/projects`, `/project`, `/in`, and `/btw` flows inside one chat.
+- New project and session helpers for multi-project work, including project-aware session browsing and switching.
+- Global controller ownership locking so one checkout cannot silently steal the live WhatsApp session from another.
+
+### Changed
+
+- Project switching now lets Codex resolve natural project hints against the configured projects instead of relying only on exact aliases.
+- Voice replies can now send a text companion when the answer includes actionable artifacts like links, slash commands, or confirmation codes.
+- High-impact voice prompts now ask for text confirmation more precisely, avoiding benign prompts while still blocking risky repo actions from voice.
+- Danger full access confirmations are shorter and easier to confirm from WhatsApp.
+- README and bridge help text now document the multi-project controller flows.
+
+### Fixed
+
+- Legacy single-project state is now fully migrated into per-project buckets so thread and error state do not leak across projects.
+- Background completions now clearly tell you when a result came from another project while you were already focused elsewhere.
+- Approval replies now preserve multi-word project targets instead of collapsing them to the last token.
+- Controller summaries and MCP status output now report the active project's thread instead of a stale chat-level thread id.
+
 ## [0.4.1] - 2026-03-28
 
 ### Changed

@@ -1,6 +1,6 @@
 {
   "name": "codex-whatsapp",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "private": true,
   "type": "module",
   "description": "Repo-local Codex plugin for connecting and managing WhatsApp with terminal QR auth and app-server-backed phone control.",
