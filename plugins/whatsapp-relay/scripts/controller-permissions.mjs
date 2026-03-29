@@ -63,7 +63,9 @@ export function defaultPermissionLevel() {
 export function normalizePermissionLevel(value) {
   const normalized = String(value ?? "")
     .trim()
-    .toLowerCase();
+    .toLowerCase()
+    .replace(/[_\s]+/g, "-")
+    .replace(/-+/g, "-");
   return LEVEL_ALIASES.get(normalized) ?? null;
 }
 

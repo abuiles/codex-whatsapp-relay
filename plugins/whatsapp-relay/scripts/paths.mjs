@@ -16,6 +16,13 @@ export const controllerLogFile = path.join(dataDir, "controller.log");
 export const controllerOutboxDir = path.join(dataDir, "controller-outbox");
 export const controllerOutboxFailedDir = path.join(dataDir, "controller-outbox.failed");
 export const controllerDaemonScript = path.join(scriptDir, "controller-daemon.mjs");
+export const globalControllerOwnerFile = path.join(
+  process.env.HOME ?? repoRoot,
+  ".codex",
+  "plugins",
+  "whatsapp-relay",
+  "controller-owner.json"
+);
 
 export async function ensureRuntimeDirs() {
   await fs.mkdir(authDir, { recursive: true });

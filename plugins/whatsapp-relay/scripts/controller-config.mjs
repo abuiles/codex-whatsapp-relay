@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import { defaultProjectConfig, normalizeConfiguredProjects } from "./controller-projects.mjs";
 import { resolvePermissionLevel } from "./controller-permissions.mjs";
 import { authDir, controllerConfigFile, repoRoot } from "./paths.mjs";
 import { normalizeTtsProvider } from "./voice-replier.mjs";
@@ -87,6 +88,8 @@ function defaultConfig() {
   return {
     enabled: false,
     workspace: repoRoot,
+    defaultProject: defaultProjectConfig().alias,
+    projects: [],
     codexBin: "codex",
     model: null,
     profile: null,
@@ -134,6 +137,11 @@ function normalizeConfig(config = {}) {
       return true;
     });
 
+  const normalizedProjects = normalizeConfiguredProjects(merged);
+  merged.defaultProject = normalizedProjects.defaultProject;
+  merged.projects = normalizedProjects.projects;
+  merged.workspace = normalizedProjects.workspace;
+
   return merged;
 }
 
@@ -152,7 +160,7 @@ export class ControllerConfigStore {
       if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) {
         throw error;
       }
-      this.data = defaultConfig();
+      this.data = normalizeConfig(defaultConfig());
     }
 
     return this.data;

@@ -1,7 +1,72 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import { normalizeProjectAlias } from "./controller-projects.mjs";
 import { controllerStateFile } from "./paths.mjs";
+
+const DEFAULT_PROJECT_ALIAS = "main";
+const LEGACY_PROJECT_FIELDS = [
+  "threadId",
+  "permissionLevel",
+  "pendingPermissionConfirmation",
+  "pendingApproval",
+  "lastPromptAt",
+  "lastPromptText",
+  "lastPromptVoiceReply",
+  "lastReplyAt",
+  "lastReplyPreview",
+  "lastReplyVoiceReply",
+  "connectedThreadAt",
+  "connectedThreadName",
+  "lastThreadChoices",
+  "lastThreadChoicesAt",
+  "lastErrorAt",
+  "lastError"
+];
+
+export function defaultProjectSession() {
+  return {
+    threadId: null,
+    permissionLevel: null,
+    pendingPermissionConfirmation: null,
+    pendingApproval: null,
+    lastPromptAt: null,
+    lastPromptText: null,
+    lastPromptVoiceReply: null,
+    lastReplyAt: null,
+    lastReplyPreview: null,
+    lastReplyVoiceReply: null,
+    connectedThreadAt: null,
+    connectedThreadName: null,
+    lastThreadChoices: [],
+    lastThreadChoicesAt: null,
+    lastErrorAt: null,
+    lastError: null
+  };
+}
+
+export function defaultChatSession(phoneKey = null) {
+  return {
+    phoneKey,
+    label: null,
+    remoteJid: null,
+    activeProject: DEFAULT_PROJECT_ALIAS,
+    voiceReply: null,
+    projects: {
+      [DEFAULT_PROJECT_ALIAS]: defaultProjectSession()
+    },
+    btw: {
+      lastUsedAt: null
+    },
+    lastInboundAt: null,
+    lastInboundText: null,
+    lastInboundType: null,
+    lastVoiceTranscriptAt: null,
+    lastVoiceTranscriptModel: null,
+    lastVoiceTranscriptConfidence: null,
+    lastVoiceTranscriptMinConfidence: null
+  };
+}
 
 function defaultState() {
   return {
@@ -15,7 +80,80 @@ function defaultState() {
   };
 }
 
+function extractLegacyProjectSession(value = {}) {
+  return LEGACY_PROJECT_FIELDS.reduce((project, field) => {
+    if (value[field] !== undefined) {
+      project[field] = value[field];
+    }
+    return project;
+  }, {});
+}
+
+function normalizeProjectSession(value = {}) {
+  return {
+    ...defaultProjectSession(),
+    ...value,
+    lastThreadChoices: Array.isArray(value.lastThreadChoices) ? value.lastThreadChoices : []
+  };
+}
+
+function normalizeChatSession(value = {}, phoneKey = null) {
+  const merged = {
+    ...defaultChatSession(phoneKey),
+    ...value
+  };
+  for (const field of LEGACY_PROJECT_FIELDS) {
+    delete merged[field];
+  }
+
+  const activeProject = normalizeProjectAlias(
+    value.activeProject ?? DEFAULT_PROJECT_ALIAS,
+    DEFAULT_PROJECT_ALIAS
+  );
+  const rawProjects =
+    value.projects && typeof value.projects === "object" ? value.projects : {};
+  const legacyProject = extractLegacyProjectSession(value);
+  const projectEntries = Object.entries(rawProjects).map(([alias, project]) => [
+    normalizeProjectAlias(alias, DEFAULT_PROJECT_ALIAS),
+    normalizeProjectSession(project)
+  ]);
+
+  if (!projectEntries.length || Object.keys(legacyProject).length) {
+    projectEntries.push([
+      activeProject,
+      normalizeProjectSession({
+        ...(rawProjects[activeProject] ?? {}),
+        ...legacyProject
+      })
+    ]);
+  }
+
+  const projects = Object.fromEntries(projectEntries);
+  if (!projects[activeProject]) {
+    projects[activeProject] = defaultProjectSession();
+  }
+
+  return {
+    ...merged,
+    phoneKey: phoneKey ?? value.phoneKey ?? null,
+    activeProject,
+    voiceReply: value.voiceReply ?? null,
+    projects,
+    btw: {
+      ...defaultChatSession().btw,
+      ...(value.btw ?? {})
+    }
+  };
+}
+
 function normalizeState(value = {}) {
+  const sessions = Object.fromEntries(
+    Object.entries(value.sessions ?? {}).map(([phoneKey, session]) => [
+      phoneKey,
+      normalizeChatSession(session, phoneKey)
+    ])
+  );
+
   return {
     ...defaultState(),
     ...value,
@@ -23,7 +161,7 @@ function normalizeState(value = {}) {
       ...defaultState().process,
       ...(value.process ?? {})
     },
-    sessions: value.sessions ?? {}
+    sessions
   };
 }
 
@@ -103,10 +241,21 @@ export class ControllerStateStore {
     });
   }
 
+  getSession(phoneKey) {
+    return normalizeChatSession(this.data.sessions[phoneKey] ?? {}, phoneKey);
+  }
+
   listSessions() {
-    return Object.entries(this.data.sessions).map(([phoneKey, session]) => ({
-      phoneKey,
-      ...session
-    }));
+    return Object.entries(this.data.sessions).map(([phoneKey, session]) => {
+      const normalized = normalizeChatSession(session, phoneKey);
+      const activeProject = normalized.activeProject;
+      const activeProjectSession = normalized.projects[activeProject] ?? defaultProjectSession();
+      return {
+        phoneKey,
+        ...normalized,
+        threadId: activeProjectSession.threadId ?? null,
+        permissionLevel: activeProjectSession.permissionLevel ?? null
+      };
+    });
   }
 }

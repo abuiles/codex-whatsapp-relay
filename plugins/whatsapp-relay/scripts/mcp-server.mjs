@@ -93,13 +93,15 @@ function controllerSummaryLines(config, processStatus) {
     `enabled: ${config.enabled ? "yes" : "no"}`,
     `running: ${processStatus.running ? "yes" : "no"}`,
     "codex_transport: app-server",
+    `default_project: ${config.defaultProject}`,
     `workspace: ${config.workspace}`,
     `codex_bin: ${config.codexBin}`,
     `default_permission_level: ${config.permissionLevel}`,
     `capture_all_direct_messages: ${config.captureAllDirectMessages ? "yes" : "no"}`,
     `tts_provider: ${config.ttsProvider}`,
     `tts_chatterbox_allow_non_english: ${config.ttsChatterboxAllowNonEnglish ? "yes" : "no"}`,
-    `allowed_controller_count: ${config.allowedControllers.length}`
+    `allowed_controller_count: ${config.allowedControllers.length}`,
+    `project_count: ${config.projects.length}`
   ];
 
   if (config.profile) {
@@ -132,12 +134,24 @@ function controllerSummaryLines(config, processStatus) {
     }
   }
 
+  if (config.projects.length) {
+    lines.push("");
+    lines.push("projects:");
+    for (const project of config.projects) {
+      lines.push(
+        `- ${project.alias}${project.alias === config.defaultProject ? " (default)" : ""} workspace=${project.workspace}`
+      );
+    }
+  }
+
   if (processStatus.sessions.length) {
     lines.push("");
     lines.push("sessions:");
     for (const session of processStatus.sessions) {
       lines.push(
-        `- ${session.label ? `${session.label} ` : ""}${session.phoneKey} thread=${
+        `- ${session.label ? `${session.label} ` : ""}${session.phoneKey} active_project=${
+          session.activeProject ?? config.defaultProject
+        } thread=${
           session.threadId ? session.threadId.slice(0, 8) : "none"
         } permissions=${session.permissionLevel ?? config.permissionLevel}`
       );
@@ -325,6 +339,20 @@ server.tool(
   "Start the background WhatsApp-to-Codex controller bridge for allowed numbers.",
   {
     workspace: z.string().min(1).optional(),
+    defaultProject: z.string().min(1).optional(),
+    projects: z
+      .array(
+        z.object({
+          alias: z.string().min(1).optional(),
+          workspace: z.string().min(1),
+          model: z.string().min(1).optional(),
+          profile: z.string().min(1).optional(),
+          permissionLevel: z.string().min(1).optional(),
+          search: z.boolean().optional()
+        })
+      )
+      .min(1)
+      .optional(),
     model: z.string().min(1).optional(),
     profile: z.string().min(1).optional(),
     permissionLevel: z.string().min(1).optional(),
@@ -335,6 +363,8 @@ server.tool(
   },
   async ({
     workspace,
+    defaultProject,
+    projects,
     model,
     profile,
     permissionLevel,
@@ -363,6 +393,8 @@ server.tool(
       const config = await controllerConfigStore.update({
         enabled: true,
         ...(workspace ? { workspace } : {}),
+        ...(defaultProject ? { defaultProject } : {}),
+        ...(projects ? { projects } : {}),
         ...(model ? { model } : {}),
         ...(profile ? { profile } : {}),
         ...(permissionLevel
@@ -391,7 +423,7 @@ server.tool(
           ...controllerSummaryLines(config, processStatus),
           "",
           "Allowed direct chats can now send plain text to continue their Codex session.",
-          "Bridge commands: /n, /st, /ls, /1 or /session, /p, /a, /d, /q, /x, /h"
+          "Bridge commands: /projects, /project <n|alias|hint>, /in, /btw, /n, /st, /ls, /1 or /session, /p, /a, /d, /q, /x, /h"
         ].join("\n")
       );
     } catch (error) {

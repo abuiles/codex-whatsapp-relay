@@ -4,6 +4,7 @@ import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { ControllerConfigStore } from "./controller-config.mjs";
+import { getGlobalControllerOwner } from "./controller-owner.mjs";
 import { ControllerStateStore } from "./controller-state.mjs";
 import {
   controllerDaemonScript,
@@ -55,6 +56,13 @@ export async function startControllerDaemon() {
   const current = await getControllerProcessStatus();
   if (current.running) {
     return current;
+  }
+
+  const globalOwner = await getGlobalControllerOwner();
+  if (globalOwner && globalOwner.pid !== current.pid) {
+    throw new Error(
+      `WhatsApp controller is already running from ${globalOwner.repoRoot} (pid ${globalOwner.pid}). Stop that bridge before starting another checkout.`
+    );
   }
 
   const configStore = new ControllerConfigStore();
