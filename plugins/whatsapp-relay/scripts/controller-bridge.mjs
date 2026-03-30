@@ -343,6 +343,7 @@ function helpText() {
     "/help or /h -> show this help",
     "",
     "Any other text in this direct chat continues the active project's current Codex session.",
+    "If that same project or /btw scope is already busy, prompt-like follow-ups queue automatically and run in order.",
     `Voice notes are transcribed locally with ${DEFAULT_TRANSCRIPTION_MODEL}.`,
     "Short spoken commands are supported for help, status, stop, and new session.",
     "Say or type 'start new session in alpha app inside code directory' to jump into another repo without manually adding it first.",
@@ -3543,6 +3544,13 @@ export class WhatsAppControllerBridge {
               error.message
             )
       );
+      await this.runNextQueuedPrompt({
+        phoneKey,
+        remoteJid,
+        label,
+        scopeType,
+        projectAlias: project.alias
+      });
     }
   }
 
