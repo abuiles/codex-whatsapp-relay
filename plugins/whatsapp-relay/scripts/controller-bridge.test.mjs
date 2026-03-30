@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import {
   applyRunLifecycleEvent,
@@ -23,6 +26,7 @@ import {
   shouldSplitCompoundVoiceControlRequest
 } from "./controller-bridge.mjs";
 import { normalizePermissionLevel } from "./controller-permissions.mjs";
+import { ControllerStateStore } from "./controller-state.mjs";
 
 test("parseIncomingCommand accepts shortcut aliases for admin commands", () => {
   assert.deepEqual(parseIncomingCommand("/h", true), { type: "help" });
@@ -369,6 +373,108 @@ test("renderSessionStatus includes live run status and preview for active projec
   assert.match(status, /run_status: finalizing/);
   assert.match(status, /run_preview: Preparing the final answer/);
   assert.match(status, /run_progress_at: 2026-03-30T10:00:04.000Z/);
+});
+
+test("renderSessionStatus includes queued message counts for project and btw scopes", () => {
+  const bridge = new WhatsAppControllerBridge({
+    runtime: {},
+    configStore: {
+      data: {
+        defaultProject: "alpha-app",
+        permissionLevel: "workspace-write"
+      }
+    },
+    stateStore: {
+      data: {
+        process: {}
+      },
+      getSession() {
+        return {
+          phoneKey: "123",
+          activeProject: "alpha-app",
+          projects: {
+            "alpha-app": {
+              threadId: "thread-backend",
+              permissionLevel: "workspace-write",
+              queuedPrompts: [
+                { prompt: "follow up 1" },
+                { prompt: "follow up 2" }
+              ]
+            }
+          },
+          btw: {
+            queuedPrompts: [{ prompt: "side question" }]
+          }
+        };
+      }
+    }
+  });
+
+  assert.match(bridge.renderSessionStatus("123"), /queued_messages: 2/);
+  assert.match(bridge.renderSessionStatus("123", "btw"), /queued_messages: 1/);
+});
+
+test("runNextQueuedPrompt dequeues and dispatches the next queued prompt", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "controller-bridge-test-"));
+  const filePath = path.join(tempDir, "controller-state.json");
+
+  try {
+    const stateStore = new ControllerStateStore(filePath);
+    await stateStore.load();
+    await stateStore.upsertSession("123", {
+      phoneKey: "123",
+      activeProject: "alpha-app",
+      remoteJid: "123@s.whatsapp.net",
+      label: "Test User",
+      projects: {
+        "alpha-app": {
+          threadId: "thread-backend",
+          queuedPrompts: [
+            {
+              prompt: "review the failing tests",
+              queuedAt: "2026-03-30T10:00:00.000Z",
+              forceNewThread: false
+            }
+          ]
+        }
+      }
+    });
+
+    const bridge = new WhatsAppControllerBridge({
+      runtime: {},
+      configStore: {
+        data: {
+          defaultProject: "alpha-app",
+          permissionLevel: "workspace-write"
+        }
+      },
+      stateStore
+    });
+
+    const dispatched = [];
+    bridge.runPrompt = async (args) => {
+      dispatched.push(args);
+    };
+
+    const handled = await bridge.runNextQueuedPrompt({
+      phoneKey: "123",
+      remoteJid: "123@s.whatsapp.net",
+      label: "Test User",
+      scopeType: "project",
+      projectAlias: "alpha-app"
+    });
+
+    assert.equal(handled, true);
+    assert.equal(dispatched.length, 1);
+    assert.equal(dispatched[0].prompt, "review the failing tests");
+    assert.equal(dispatched[0].statusPrelude, "Running your queued follow-up in alpha-app now.");
+    assert.equal(
+      stateStore.getSession("123").projects["alpha-app"].queuedPrompts.length,
+      0
+    );
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("buildVoiceReplyTextCompanion extracts actionable artifacts for spoken replies", () => {

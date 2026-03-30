@@ -24,6 +24,32 @@ const LEGACY_PROJECT_FIELDS = [
   "lastError"
 ];
 
+function normalizeQueuedPrompt(value = {}) {
+  const prompt = typeof value.prompt === "string" ? value.prompt.trim() : "";
+  if (!prompt) {
+    return null;
+  }
+
+  return {
+    prompt,
+    forceNewThread: Boolean(value.forceNewThread),
+    queuedAt: typeof value.queuedAt === "string" ? value.queuedAt : null,
+    voiceReplyOverride:
+      value.voiceReplyOverride?.enabled
+        ? {
+            enabled: true,
+            speed: value.voiceReplyOverride.speed ?? null
+          }
+        : null
+  };
+}
+
+function normalizeQueuedPromptList(value) {
+  return Array.isArray(value)
+    ? value.map((item) => normalizeQueuedPrompt(item)).filter(Boolean)
+    : [];
+}
+
 export function defaultProjectSession() {
   return {
     threadId: null,
@@ -41,7 +67,8 @@ export function defaultProjectSession() {
     lastThreadChoices: [],
     lastThreadChoicesAt: null,
     lastErrorAt: null,
-    lastError: null
+    lastError: null,
+    queuedPrompts: []
   };
 }
 
@@ -56,7 +83,8 @@ export function defaultChatSession(phoneKey = null) {
       [DEFAULT_PROJECT_ALIAS]: defaultProjectSession()
     },
     btw: {
-      lastUsedAt: null
+      lastUsedAt: null,
+      queuedPrompts: []
     },
     lastInboundAt: null,
     lastInboundText: null,
@@ -93,7 +121,8 @@ function normalizeProjectSession(value = {}) {
   return {
     ...defaultProjectSession(),
     ...value,
-    lastThreadChoices: Array.isArray(value.lastThreadChoices) ? value.lastThreadChoices : []
+    lastThreadChoices: Array.isArray(value.lastThreadChoices) ? value.lastThreadChoices : [],
+    queuedPrompts: normalizeQueuedPromptList(value.queuedPrompts)
   };
 }
 
@@ -141,7 +170,8 @@ function normalizeChatSession(value = {}, phoneKey = null) {
     projects,
     btw: {
       ...defaultChatSession().btw,
-      ...(value.btw ?? {})
+      ...(value.btw ?? {}),
+      queuedPrompts: normalizeQueuedPromptList(value.btw?.queuedPrompts)
     }
   };
 }

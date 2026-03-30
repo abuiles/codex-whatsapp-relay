@@ -119,3 +119,55 @@ test("ControllerStateStore strips legacy project fields from the top chat sessio
     await fs.rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("ControllerStateStore persists queued prompts per project and btw scope", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "controller-state-test-"));
+  const filePath = path.join(tempDir, "controller-state.json");
+
+  try {
+    const store = new ControllerStateStore(filePath);
+    await store.load();
+    await store.upsertSession("123", {
+      phoneKey: "123",
+      activeProject: "alpha-app",
+      projects: {
+        "alpha-app": {
+          queuedPrompts: [
+            {
+              prompt: "review the failing tests",
+              queuedAt: "2026-03-30T10:00:00.000Z",
+              forceNewThread: false
+            },
+            {
+              prompt: "  ",
+              queuedAt: "2026-03-30T10:00:05.000Z",
+              forceNewThread: false
+            }
+          ]
+        }
+      },
+      btw: {
+        queuedPrompts: [
+          {
+            prompt: "what changed in the release?",
+            queuedAt: "2026-03-30T10:01:00.000Z",
+            forceNewThread: true,
+            voiceReplyOverride: {
+              enabled: true,
+              speed: "2x"
+            }
+          }
+        ]
+      }
+    });
+
+    const session = store.getSession("123");
+    assert.equal(session.projects["alpha-app"].queuedPrompts.length, 1);
+    assert.equal(session.projects["alpha-app"].queuedPrompts[0].prompt, "review the failing tests");
+    assert.equal(session.btw.queuedPrompts.length, 1);
+    assert.equal(session.btw.queuedPrompts[0].voiceReplyOverride.enabled, true);
+    assert.equal(session.btw.queuedPrompts[0].voiceReplyOverride.speed, "2x");
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});

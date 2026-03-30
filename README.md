@@ -141,6 +141,8 @@ Session control:
 - `/session <project> <number|thread-id-prefix>` or `/c <...>` to switch another project's session directly
 - `/status` or `/st [project]` to inspect the active project session or another project's session, including the live run status and latest progress preview while a run is active
 
+If you send another normal prompt while that same project or `/btw` scope is already busy, the relay now queues it, acknowledges that it was queued, and automatically runs it after the current task finishes successfully.
+
 Permissions and approvals:
 
 - `/permissions` or `/p [project]` to inspect the current permission level
