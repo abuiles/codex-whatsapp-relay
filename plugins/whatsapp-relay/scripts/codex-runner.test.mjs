@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   buildProjectIntentPrompt,
   buildVoiceCommandIntentPrompt,
+  normalizeCodexTurnNotification,
   normalizeProjectIntentSelection,
   normalizeVoiceCommandIntent
 } from "./codex-runner.mjs";
@@ -151,5 +152,86 @@ test("normalizeProjectIntentSelection accepts only known aliases", () => {
       projectAlias: null,
       candidateAliases: []
     }
+  );
+});
+
+test("normalizeCodexTurnNotification normalizes matching agent and turn events", () => {
+  assert.deepEqual(
+    normalizeCodexTurnNotification(
+      {
+        method: "item/started",
+        params: {
+          turnId: "turn-1",
+          item: {
+            type: "agentMessage",
+            id: "msg-1",
+            phase: "analysis",
+            text: "Reviewing the failing tests"
+          }
+        }
+      },
+      { activeTurnId: "turn-1", resolvedThreadId: "thread-1" }
+    ),
+    {
+      type: "agentMessageStarted",
+      turnId: "turn-1",
+      itemId: "msg-1",
+      phase: "analysis",
+      text: "Reviewing the failing tests"
+    }
+  );
+
+  assert.deepEqual(
+    normalizeCodexTurnNotification(
+      {
+        method: "turn/completed",
+        params: {
+          turn: {
+            id: "turn-1",
+            status: "completed",
+            error: null
+          }
+        }
+      },
+      { activeTurnId: "turn-1", resolvedThreadId: "thread-1" }
+    ),
+    {
+      type: "turnCompleted",
+      turnId: "turn-1",
+      threadId: "thread-1",
+      status: "completed",
+      error: null
+    }
+  );
+});
+
+test("normalizeCodexTurnNotification ignores unrelated turns and threads", () => {
+  assert.equal(
+    normalizeCodexTurnNotification(
+      {
+        method: "item/agentMessage/delta",
+        params: {
+          turnId: "turn-other",
+          itemId: "msg-1",
+          delta: "hello"
+        }
+      },
+      { activeTurnId: "turn-1", resolvedThreadId: "thread-1" }
+    ),
+    null
+  );
+
+  assert.equal(
+    normalizeCodexTurnNotification(
+      {
+        method: "serverRequest/resolved",
+        params: {
+          threadId: "thread-other",
+          requestId: 42
+        }
+      },
+      { activeTurnId: "turn-1", resolvedThreadId: "thread-1" }
+    ),
+    null
   );
 });

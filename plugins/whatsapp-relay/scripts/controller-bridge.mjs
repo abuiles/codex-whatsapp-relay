@@ -48,6 +48,7 @@ const SESSION_LIST_LIMIT = 12;
 const SESSION_CONNECT_SEARCH_LIMIT = 50;
 const THREAD_SHORTCUT_TTL_MS = 30 * 60_000;
 const DANGER_CONFIRMATION_WINDOW_MS = 60_000;
+const ACTIVE_RUN_PREVIEW_LIMIT = 160;
 const VOICE_REPLY_SPEEDS = new Set(["1x", "2x"]);
 const LOGGED_OUT_RECOVERY_MS = 60_000;
 const VOICE_REPLY_LANGUAGE_TAG =
@@ -165,6 +166,74 @@ function splitMessage(text, limit = MAX_WHATSAPP_MESSAGE) {
 
 function shortThreadId(threadId) {
   return threadId ? threadId.slice(0, 8) : "none";
+}
+
+function compactRunPreview(value, limit = ACTIVE_RUN_PREVIEW_LIMIT) {
+  const text = String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text ? text.slice(0, limit) : null;
+}
+
+function buildActiveRunStatusLines(activeRun) {
+  if (!activeRun) {
+    return [];
+  }
+
+  return [
+    `run_status: ${activeRun.status ?? "running"}`,
+    activeRun.progressPreview ? `run_preview: ${activeRun.progressPreview}` : null,
+    activeRun.lastProgressAt ? `run_progress_at: ${activeRun.lastProgressAt}` : null
+  ].filter(Boolean);
+}
+
+export function applyRunLifecycleEvent(activeRun, event, timestamp = new Date().toISOString()) {
+  if (!activeRun || !event || typeof event !== "object") {
+    return activeRun;
+  }
+
+  activeRun.lastEventAt = timestamp;
+
+  switch (event.type) {
+    case "turnStarted":
+      activeRun.status = "running";
+      activeRun.threadId = activeRun.threadId ?? event.threadId ?? null;
+      return activeRun;
+    case "agentMessageStarted":
+    case "agentMessageDelta":
+    case "agentMessageCompleted": {
+      activeRun.status = event.phase === "final_answer" ? "finalizing" : "running";
+      activeRun.progressPhase = event.phase ?? activeRun.progressPhase ?? null;
+      const preview = compactRunPreview(event.text);
+      if (preview) {
+        activeRun.progressPreview = preview;
+        activeRun.lastProgressAt = timestamp;
+      }
+      return activeRun;
+    }
+    case "approvalRequested":
+      activeRun.status = "waiting_for_approval";
+      return activeRun;
+    case "approvalResolved":
+      activeRun.status = "running";
+      return activeRun;
+    case "turnCompleted":
+      activeRun.status = event.status === "completed" ? "completed" : String(event.status);
+      activeRun.threadId = activeRun.threadId ?? event.threadId ?? null;
+      return activeRun;
+    case "turnError":
+      activeRun.status = event.willRetry ? "retrying" : "failed";
+      if (!activeRun.progressPreview) {
+        const preview = compactRunPreview(event.error);
+        if (preview) {
+          activeRun.progressPreview = preview;
+          activeRun.lastProgressAt = timestamp;
+        }
+      }
+      return activeRun;
+    default:
+      return activeRun;
+  }
 }
 
 function buildThreadName({ label, phoneKey, projectAlias = null, scopeType = "project" }) {
@@ -1608,23 +1677,33 @@ export class WhatsAppControllerBridge {
 
   summary() {
     const sessions = this.stateStore.listSessions().map((session) => {
+      const activeProjectAlias = session.activeProject ?? this.configStore.data.defaultProject;
       const activeProjectSession =
-        session.projects?.[session.activeProject] ?? defaultProjectSession();
+        session.projects?.[activeProjectAlias] ?? defaultProjectSession();
+      const activeRun = this.projectRun(session.phoneKey, activeProjectAlias);
       return {
         phoneKey: session.phoneKey,
         label: session.label ?? null,
-        activeProject: session.activeProject ?? this.configStore.data.defaultProject,
+        activeProject: activeProjectAlias,
         threadId: activeProjectSession.threadId ?? null,
         busy:
           this.activeProjectRuns(session.phoneKey).length > 0 ||
           Boolean(this.btwRun(session.phoneKey)),
+        runStatus: activeRun?.status ?? null,
+        runPreview: activeRun?.progressPreview ?? null,
+        runLastEventAt: activeRun?.lastEventAt ?? null,
         permissionLevel:
           activeProjectSession.permissionLevel ?? this.configStore.data.permissionLevel,
-        projects: Object.entries(session.projects ?? {}).map(([alias, projectSession]) => ({
-          alias,
-          threadId: projectSession.threadId ?? null,
-          busy: Boolean(this.projectRun(session.phoneKey, alias))
-        })),
+        projects: Object.entries(session.projects ?? {}).map(([alias, projectSession]) => {
+          const run = this.projectRun(session.phoneKey, alias);
+          return {
+            alias,
+            threadId: projectSession.threadId ?? null,
+            busy: Boolean(run),
+            runStatus: run?.status ?? null,
+            runPreview: run?.progressPreview ?? null
+          };
+        }),
         lastPromptAt: activeProjectSession.lastPromptAt ?? null,
         lastReplyAt: activeProjectSession.lastReplyAt ?? null
       };
@@ -2262,6 +2341,7 @@ export class WhatsAppControllerBridge {
         "target: btw",
         `busy: ${btw ? "yes" : "no"}`,
         `voice_reply: ${formatVoiceReplySummary(voiceReply)}`,
+        ...buildActiveRunStatusLines(btw),
         btw?.pendingApproval ? `approval_pending: yes (${btw.pendingApproval.kind})` : null
       ]
         .filter(Boolean)
@@ -2291,6 +2371,7 @@ export class WhatsAppControllerBridge {
       `voice_reply_provider: ${resolveConfiguredTtsProvider(config)}`,
       busyProjects.length ? `busy_projects: ${busyProjects.join(", ")}` : null,
       this.btwRun(phoneKey) ? "btw_busy: yes" : null,
+      ...buildActiveRunStatusLines(activeRun),
       activeRun?.pendingApproval ? `approval_pending: yes (${activeRun.pendingApproval.kind})` : null,
       pendingConfirmation
         ? `danger_full_access_confirmation: pending until ${pendingConfirmation.expiresAt}`
@@ -2972,6 +3053,14 @@ export class WhatsAppControllerBridge {
             }
           });
         }
+      },
+      onLifecycleEvent: (event) => {
+        const currentRun = this.activeRuns.get(runKey);
+        if (!currentRun) {
+          return;
+        }
+
+        applyRunLifecycleEvent(currentRun, event);
       }
     });
 
@@ -2983,6 +3072,11 @@ export class WhatsAppControllerBridge {
       startedAt: new Date().toISOString(),
       cancelled: false,
       pendingApproval: null,
+      status: "starting",
+      lastEventAt: new Date().toISOString(),
+      lastProgressAt: null,
+      progressPhase: null,
+      progressPreview: null,
       voiceReply: activeVoiceReply,
       scopeType,
       projectAlias: scopeType === "project" ? project.alias : null

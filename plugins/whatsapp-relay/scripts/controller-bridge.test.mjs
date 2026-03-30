@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  applyRunLifecycleEvent,
   buildVoiceReplyTextCompanion,
   buildDangerFullAccessConfirmationMessage,
   formatProjectRunReplyPrefix,
@@ -232,6 +233,52 @@ test("formatProjectRunReplyPrefix marks background completions clearly", () => {
   );
 });
 
+test("applyRunLifecycleEvent tracks live progress and approvals for an active run", () => {
+  const activeRun = {
+    status: "starting",
+    threadId: null,
+    progressPhase: null,
+    progressPreview: null,
+    lastEventAt: null,
+    lastProgressAt: null
+  };
+
+  applyRunLifecycleEvent(
+    activeRun,
+    {
+      type: "turnStarted",
+      threadId: "thread-backend"
+    },
+    "2026-03-30T10:00:00.000Z"
+  );
+  assert.equal(activeRun.status, "running");
+  assert.equal(activeRun.threadId, "thread-backend");
+
+  applyRunLifecycleEvent(
+    activeRun,
+    {
+      type: "agentMessageDelta",
+      phase: "analysis",
+      text: "  Reviewing the failing tests for the active project.  "
+    },
+    "2026-03-30T10:00:02.000Z"
+  );
+  assert.equal(activeRun.status, "running");
+  assert.equal(activeRun.progressPhase, "analysis");
+  assert.equal(activeRun.progressPreview, "Reviewing the failing tests for the active project.");
+  assert.equal(activeRun.lastProgressAt, "2026-03-30T10:00:02.000Z");
+
+  applyRunLifecycleEvent(
+    activeRun,
+    {
+      type: "approvalRequested"
+    },
+    "2026-03-30T10:00:03.000Z"
+  );
+  assert.equal(activeRun.status, "waiting_for_approval");
+  assert.equal(activeRun.lastEventAt, "2026-03-30T10:00:03.000Z");
+});
+
 test("WhatsAppControllerBridge summary reports the active project's thread id", () => {
   const bridge = new WhatsAppControllerBridge({
     runtime: {},
@@ -273,8 +320,55 @@ test("WhatsAppControllerBridge summary reports the active project's thread id", 
       }
     }
   });
+  bridge.activeRuns.set("project:123:alpha-app", {
+    status: "running",
+    progressPreview: "Reviewing the failing tests",
+    lastEventAt: "2026-03-30T10:00:00.000Z"
+  });
 
-  assert.equal(bridge.summary().sessions[0].threadId, "thread-backend");
+  const summary = bridge.summary();
+  assert.equal(summary.sessions[0].threadId, "thread-backend");
+  assert.equal(summary.sessions[0].runStatus, "running");
+  assert.equal(summary.sessions[0].runPreview, "Reviewing the failing tests");
+});
+
+test("renderSessionStatus includes live run status and preview for active projects", () => {
+  const bridge = new WhatsAppControllerBridge({
+    runtime: {},
+    configStore: {
+      data: {
+        defaultProject: "alpha-app",
+        permissionLevel: "workspace-write"
+      }
+    },
+    stateStore: {
+      data: {
+        process: {}
+      },
+      getSession() {
+        return {
+          phoneKey: "123",
+          activeProject: "alpha-app",
+          projects: {
+            "alpha-app": {
+              threadId: "thread-backend",
+              permissionLevel: "workspace-write"
+            }
+          }
+        };
+      }
+    }
+  });
+  bridge.activeRuns.set("project:123:alpha-app", {
+    status: "finalizing",
+    progressPreview: "Preparing the final answer",
+    lastProgressAt: "2026-03-30T10:00:04.000Z"
+  });
+
+  const status = bridge.renderSessionStatus("123");
+  assert.match(status, /run_status: finalizing/);
+  assert.match(status, /run_preview: Preparing the final answer/);
+  assert.match(status, /run_progress_at: 2026-03-30T10:00:04.000Z/);
 });
 
 test("buildVoiceReplyTextCompanion extracts actionable artifacts for spoken replies", () => {

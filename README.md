@@ -139,7 +139,7 @@ Session control:
 - `/1`, `/2`, ... to jump to one of the most recently listed sessions
 - `/session <number|thread-id-prefix>` to switch the current project's session
 - `/session <project> <number|thread-id-prefix>` or `/c <...>` to switch another project's session directly
-- `/status` or `/st [project]` to inspect the active project session or another project's session
+- `/status` or `/st [project]` to inspect the active project session or another project's session, including the live run status and latest progress preview while a run is active
 
 Permissions and approvals:
 

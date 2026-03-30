@@ -347,6 +347,85 @@ export function normalizeProjectIntentSelection(result, projects = []) {
   }
 }
 
+export function normalizeCodexTurnNotification(
+  message,
+  { activeTurnId = null, resolvedThreadId = null } = {}
+) {
+  const { method, params } = message ?? {};
+  if (!params) {
+    return null;
+  }
+
+  switch (method) {
+    case "item/started":
+      if (params.turnId === activeTurnId && params.item?.type === "agentMessage") {
+        return {
+          type: "agentMessageStarted",
+          turnId: params.turnId,
+          itemId: params.item.id,
+          phase: params.item.phase ?? null,
+          text: params.item.text ?? ""
+        };
+      }
+      return null;
+    case "item/agentMessage/delta":
+      if (params.turnId === activeTurnId) {
+        return {
+          type: "agentMessageDelta",
+          turnId: params.turnId,
+          itemId: params.itemId,
+          delta: params.delta ?? ""
+        };
+      }
+      return null;
+    case "item/completed":
+      if (params.turnId === activeTurnId && params.item?.type === "agentMessage") {
+        return {
+          type: "agentMessageCompleted",
+          turnId: params.turnId,
+          itemId: params.item.id,
+          phase: params.item.phase ?? null,
+          text: params.item.text ?? ""
+        };
+      }
+      return null;
+    case "serverRequest/resolved":
+      if (params.threadId === resolvedThreadId && params.requestId !== undefined) {
+        return {
+          type: "approvalResolved",
+          requestId: params.requestId,
+          threadId: params.threadId,
+          turnId: params.turnId ?? null
+        };
+      }
+      return null;
+    case "turn/completed":
+      if (params.turn?.id === activeTurnId) {
+        return {
+          type: "turnCompleted",
+          turnId: params.turn.id,
+          threadId: resolvedThreadId,
+          status: params.turn.status,
+          error: params.turn.error ?? null
+        };
+      }
+      return null;
+    case "error":
+      if (params.turnId === activeTurnId || params.threadId === resolvedThreadId) {
+        return {
+          type: "turnError",
+          turnId: params.turnId ?? null,
+          threadId: params.threadId ?? null,
+          willRetry: Boolean(params.willRetry),
+          error: params.error ?? null
+        };
+      }
+      return null;
+    default:
+      return null;
+  }
+}
+
 function formatRequestError(message = "Unknown app-server error.") {
   return new Error(message);
 }
@@ -842,7 +921,8 @@ export function startCodexTurn({
   search = false,
   permissionLevel = "workspace-write",
   onApprovalRequest = null,
-  onApprovalResolved = null
+  onApprovalResolved = null,
+  onLifecycleEvent = null
 }) {
   if (!prompt?.trim()) {
     throw new Error("Codex prompt cannot be empty.");
@@ -911,55 +991,57 @@ export function startCodexTurn({
   }
 
   function handleNotification(message) {
-    const { method, params } = message;
-    if (!params) {
+    const event = normalizeCodexTurnNotification(message, {
+      activeTurnId,
+      resolvedThreadId
+    });
+    if (!event) {
       return;
     }
 
-    switch (method) {
-      case "item/started":
-        if (params.turnId === activeTurnId && params.item?.type === "agentMessage") {
-          agentMessages.set(params.item.id, {
-            phase: params.item.phase ?? null,
-            text: params.item.text ?? ""
-          });
-        }
+    switch (event.type) {
+      case "agentMessageStarted":
+        agentMessages.set(event.itemId, {
+          phase: event.phase ?? null,
+          text: event.text ?? ""
+        });
+        onLifecycleEvent?.(event);
         return;
-      case "item/agentMessage/delta": {
-        if (params.turnId !== activeTurnId) {
-          return;
-        }
-
-        const current = agentMessages.get(params.itemId) ?? {
+      case "agentMessageDelta": {
+        const current = agentMessages.get(event.itemId) ?? {
           phase: null,
           text: ""
         };
-        current.text += params.delta;
-        agentMessages.set(params.itemId, current);
+        current.text += event.delta;
+        agentMessages.set(event.itemId, current);
+        onLifecycleEvent?.({
+          ...event,
+          phase: current.phase ?? null,
+          text: current.text
+        });
         return;
       }
-      case "item/completed":
-        if (params.turnId === activeTurnId && params.item?.type === "agentMessage") {
-          handleAgentMessage(params.item);
-        }
+      case "agentMessageCompleted":
+        handleAgentMessage({
+          id: event.itemId,
+          phase: event.phase ?? null,
+          text: event.text ?? ""
+        });
+        onLifecycleEvent?.(event);
         return;
-      case "serverRequest/resolved":
-        if (params.threadId === resolvedThreadId && params.requestId !== undefined) {
-          onApprovalResolved?.({
-            requestId: params.requestId,
-            threadId: params.threadId,
-            turnId: params.turnId ?? null
-          });
-        }
+      case "approvalResolved":
+        onApprovalResolved?.({
+          requestId: event.requestId,
+          threadId: event.threadId,
+          turnId: event.turnId
+        });
+        onLifecycleEvent?.(event);
         return;
-      case "turn/completed":
-        if (params.turn.id !== activeTurnId) {
-          return;
-        }
-
-        if (params.turn.status === "failed") {
-          settle("reject", formatTurnError(params.turn.error));
-        } else if (params.turn.status === "interrupted") {
+      case "turnCompleted":
+        onLifecycleEvent?.(event);
+        if (event.status === "failed") {
+          settle("reject", formatTurnError(event.error));
+        } else if (event.status === "interrupted") {
           settle("reject", new Error("Codex run was interrupted."));
         } else {
           settle("resolve", {
@@ -970,16 +1052,18 @@ export function startCodexTurn({
 
         client.shutdown().catch(() => {});
         return;
-      case "error":
-        if (params.turnId !== activeTurnId && params.threadId !== resolvedThreadId) {
-          return;
-        }
-
-        if (!params.willRetry) {
-          settle("reject", formatTurnError(params.error));
+      case "turnError": {
+        const formattedError = formatTurnError(event.error);
+        onLifecycleEvent?.({
+          ...event,
+          error: formattedError.message
+        });
+        if (!event.willRetry) {
+          settle("reject", formattedError);
           client.shutdown().catch(() => {});
         }
         return;
+      }
       default:
         return;
     }
@@ -991,8 +1075,8 @@ export function startCodexTurn({
     switch (method) {
       case "item/commandExecution/requestApproval":
       case "item/fileChange/requestApproval":
-      case "item/permissions/requestApproval":
-        onApprovalRequest?.({
+      case "item/permissions/requestApproval": {
+        const approval = {
           requestId: id,
           threadId: params?.threadId ?? resolvedThreadId,
           turnId: params?.turnId ?? activeTurnId,
@@ -1005,8 +1089,18 @@ export function startCodexTurn({
                 : "permissions",
           availableDecisions: params?.availableDecisions ?? null,
           ...params
+        };
+        onApprovalRequest?.(approval);
+        onLifecycleEvent?.({
+          type: "approvalRequested",
+          requestId: approval.requestId,
+          threadId: approval.threadId,
+          turnId: approval.turnId,
+          itemId: approval.itemId,
+          kind: approval.kind
         });
         return;
+      }
       default:
         return;
     }
@@ -1069,6 +1163,11 @@ export function startCodexTurn({
     });
 
     activeTurnId = turnResult.turn.id;
+    onLifecycleEvent?.({
+      type: "turnStarted",
+      turnId: activeTurnId,
+      threadId: resolvedThreadId
+    });
   })();
 
   bootstrap.catch((error) => {
