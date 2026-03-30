@@ -1569,6 +1569,41 @@ export class WhatsAppControllerBridge {
     return nextPrompt;
   }
 
+  async clearQueuedPrompts(phoneKey, { scopeType = "project", projectAlias = null } = {}) {
+    const chatSession = this.getChatSession(phoneKey);
+    if (scopeType === "btw") {
+      const queuedCount = (chatSession.btw?.queuedPrompts ?? []).length;
+      if (!queuedCount) {
+        return 0;
+      }
+
+      await this.upsertChatSession(phoneKey, {
+        phoneKey,
+        btw: {
+          ...(chatSession.btw ?? {}),
+          queuedPrompts: []
+        }
+      });
+      return queuedCount;
+    }
+
+    const project = resolveConfiguredProject(
+      this.configStore.data,
+      projectAlias ?? this.getActiveProject(phoneKey).alias
+    );
+    const queuedCount = (chatSession.projects?.[project.alias]?.queuedPrompts ?? []).length;
+    if (!queuedCount) {
+      return 0;
+    }
+
+    await this.upsertProjectSession(phoneKey, project.alias, {
+      projectPatch: {
+        queuedPrompts: []
+      }
+    });
+    return queuedCount;
+  }
+
   async queuePromptIfBusy({
     phoneKey,
     remoteJid,
@@ -3170,6 +3205,10 @@ export class WhatsAppControllerBridge {
     }
 
     this.activeRuns.delete(runKey);
+    const clearedQueued = await this.clearQueuedPrompts(phoneKey, {
+      scopeType: target.targetType === "btw" ? "btw" : "project",
+      projectAlias: project.alias
+    });
     if (target.targetType !== "btw") {
       await this.upsertProjectSession(phoneKey, project.alias, {
         projectPatch: {
@@ -3179,9 +3218,16 @@ export class WhatsAppControllerBridge {
     }
     await this.sendReply(
       remoteJid,
-      target.targetType === "btw"
-        ? "Stopped the active Codex run for btw."
-        : `Stopped the active Codex run for project ${project.alias}.`
+      joinMessageSections(
+        target.targetType === "btw"
+          ? "Stopped the active Codex run for btw."
+          : `Stopped the active Codex run for project ${project.alias}.`,
+        clearedQueued
+          ? `Cleared ${clearedQueued} queued follow-up message${
+              clearedQueued === 1 ? "" : "s"
+            } for this scope.`
+          : null
+      )
     );
   }
 

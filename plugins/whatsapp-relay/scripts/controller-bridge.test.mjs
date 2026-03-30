@@ -477,6 +477,66 @@ test("runNextQueuedPrompt dequeues and dispatches the next queued prompt", async
   }
 });
 
+test("stopActiveRun clears queued follow-ups for the stopped project scope", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "controller-bridge-stop-test-"));
+  const filePath = path.join(tempDir, "controller-state.json");
+
+  try {
+    const stateStore = new ControllerStateStore(filePath);
+    await stateStore.load();
+    await stateStore.upsertSession("123", {
+      phoneKey: "123",
+      activeProject: "alpha-app",
+      remoteJid: "123@s.whatsapp.net",
+      label: "Test User",
+      projects: {
+        "alpha-app": {
+          threadId: "thread-backend",
+          queuedPrompts: [
+            { prompt: "follow up 1", queuedAt: "2026-03-30T10:00:00.000Z" },
+            { prompt: "follow up 2", queuedAt: "2026-03-30T10:00:05.000Z" }
+          ]
+        }
+      }
+    });
+
+    const bridge = new WhatsAppControllerBridge({
+      runtime: {},
+      configStore: {
+        data: {
+          defaultProject: "alpha-app",
+          permissionLevel: "workspace-write"
+        }
+      },
+      stateStore
+    });
+
+    const replies = [];
+    bridge.sendReply = async (_remoteJid, text) => {
+      replies.push(text);
+    };
+    bridge.activeRuns.set("project:123:alpha-app", {
+      cancelled: false,
+      pendingApproval: null,
+      interrupt: async () => {},
+      child: {
+        killed: true,
+        kill() {}
+      }
+    });
+
+    await bridge.stopActiveRun("123", "123@s.whatsapp.net", "");
+
+    assert.equal(
+      stateStore.getSession("123").projects["alpha-app"].queuedPrompts.length,
+      0
+    );
+    assert.match(replies[0], /Cleared 2 queued follow-up messages for this scope\./);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("buildVoiceReplyTextCompanion extracts actionable artifacts for spoken replies", () => {
   assert.equal(
     buildVoiceReplyTextCompanion(
