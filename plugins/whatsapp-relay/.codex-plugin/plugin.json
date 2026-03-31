@@ -2,6 +2,7 @@
   "name": "whatsapp-relay",
   "version": "0.4.3",
   "description": "Link a local WhatsApp account to Codex, manage chats, and control Codex from allowed WhatsApp numbers.",
+  "install_url": "https://raw.githubusercontent.com/abuiles/codex-whatsapp-relay/refs/heads/main/plugins/whatsapp-relay/.codex-plugin/plugin.json",
   "author": {
     "name": "Adolfo Builes",
     "url": "https://github.com/abuiles"
@@ -23,7 +24,7 @@
     "shortDescription": "Put Codex in your WhatsApp",
     "longDescription": "Link a local WhatsApp account to Codex with a QR code, inspect chats and send messages through MCP, and optionally turn an allowed direct chat into a persistent Codex session over codex app-server.",
     "developerName": "Adolfo Builes",
-    "category": "Productivity",
+    "category": "Tools & Integrations",
     "capabilities": [
       "Interactive",
       "Write"
