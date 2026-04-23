@@ -16,6 +16,7 @@ import {
   parseImplicitProjectCommand,
   parseApprovalTargetPayload,
   parseContextMonitorCommandPayload,
+  parseModelCommandPayload,
   parseVoiceReplyCommandPayload,
   normalizeVoiceCommandText,
   parseIncomingCommand,
@@ -33,6 +34,11 @@ import { ControllerStateStore } from "./controller-state.mjs";
 test("parseIncomingCommand accepts shortcut aliases for admin commands", () => {
   assert.deepEqual(parseIncomingCommand("/h", true), { type: "help" });
   assert.deepEqual(parseIncomingCommand("/st", true), { type: "status", payload: "" });
+  assert.deepEqual(parseIncomingCommand("/model", true), { type: "model", payload: "" });
+  assert.deepEqual(parseIncomingCommand("/models gpt-5.5", true), {
+    type: "models",
+    payload: "gpt-5.5"
+  });
   assert.deepEqual(parseIncomingCommand("/n review this diff", true), {
     type: "new",
     prompt: "review this diff"
@@ -123,6 +129,53 @@ test("parseIncomingCommand accepts shortcut aliases for admin commands", () => {
     payload: ""
   });
   assert.deepEqual(parseIncomingCommand("/x", true), { type: "stop", payload: "" });
+});
+
+test("parseModelCommandPayload handles status, overrides, and resets", () => {
+  const config = {
+    defaultProject: "alpha-app",
+    model: "gpt-5.4",
+    projects: [
+      { alias: "alpha-app", workspace: "/workspace/alpha-app" },
+      { alias: "beta-app", workspace: "/workspace/beta-app", model: "gpt-5.4-mini" }
+    ]
+  };
+
+  assert.deepEqual(parseModelCommandPayload("", config), {
+    action: "status",
+    scope: "project",
+    projectAlias: null,
+    model: null,
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseModelCommandPayload("global", config), {
+    action: "status",
+    scope: "global",
+    projectAlias: null,
+    model: null,
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseModelCommandPayload("gpt-5.4-mini", config), {
+    action: "set",
+    scope: "project",
+    projectAlias: null,
+    model: "gpt-5.4-mini",
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseModelCommandPayload("beta-app gpt-5.4", config), {
+    action: "set",
+    scope: "project",
+    projectAlias: "beta-app",
+    model: "gpt-5.4",
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseModelCommandPayload("reset beta-app", config), {
+    action: "reset",
+    scope: "project",
+    projectAlias: "beta-app",
+    model: null,
+    ambiguousProjects: []
+  });
 });
 
 test("parseIncomingCommand recognizes the natural-language new project session shortcut", () => {
@@ -477,6 +530,10 @@ test("renderSessionStatus includes live run status and preview for active projec
       }
     }
   });
+  bridge.codexDefaults = {
+    model: "gpt-5.4",
+    modelReasoningEffort: "xhigh"
+  };
   bridge.activeRuns.set("project:123:alpha-app", {
     status: "finalizing",
     progressPreview: "Preparing the final answer",
@@ -484,6 +541,7 @@ test("renderSessionStatus includes live run status and preview for active projec
   });
 
   const status = bridge.renderSessionStatus("123");
+  assert.match(status, /model: gpt-5\.4 \(Codex config\.toml\)/);
   assert.match(status, /run_status: finalizing/);
   assert.match(status, /run_preview: Preparing the final answer/);
   assert.match(status, /run_progress_at: 2026-03-30T10:00:04.000Z/);

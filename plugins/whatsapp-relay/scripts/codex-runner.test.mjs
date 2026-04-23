@@ -5,6 +5,8 @@ import {
   buildProjectIntentPrompt,
   buildVoiceCommandIntentPrompt,
   normalizeCodexTurnNotification,
+  parseCodexConfigDefaults,
+  parseCodexModelCatalog,
   normalizeProjectIntentSelection,
   normalizeVoiceCommandIntent
 } from "./codex-runner.mjs";
@@ -234,6 +236,56 @@ test("normalizeCodexTurnNotification ignores unrelated turns and threads", () =>
     ),
     null
   );
+});
+
+test("parseCodexModelCatalog keeps only usable model slugs", () => {
+  const models = parseCodexModelCatalog(
+    JSON.stringify({
+      models: [
+        {
+          slug: "gpt-5.4",
+          display_name: "gpt-5.4",
+          description: "Flagship coding model.",
+          visibility: "list",
+          default_reasoning_level: "high",
+          upgrade: {
+            model: "gpt-5.5"
+          }
+        },
+        {
+          slug: ""
+        }
+      ]
+    })
+  );
+
+  assert.deepEqual(models, [
+    {
+      slug: "gpt-5.4",
+      displayName: "gpt-5.4",
+      description: "Flagship coding model.",
+      visibility: "list",
+      defaultReasoningLevel: "high",
+      upgradeModel: "gpt-5.5"
+    }
+  ]);
+});
+
+test("parseCodexConfigDefaults reads only top-level model settings", () => {
+  const defaults = parseCodexConfigDefaults(`
+model = "gpt-5.4"
+model_reasoning_effort = "xhigh"
+profile = "local-dev"
+
+[projects.'C:\\Users\\example\\repo']
+model = "project-only"
+`);
+
+  assert.deepEqual(defaults, {
+    model: "gpt-5.4",
+    modelReasoningEffort: "xhigh",
+    profile: "local-dev"
+  });
 });
 
 test("normalizeCodexTurnNotification captures token usage updates for the active thread", () => {

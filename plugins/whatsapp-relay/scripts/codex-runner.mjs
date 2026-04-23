@@ -581,18 +581,163 @@ async function runCodexExec({
     stdio: ["ignore", "pipe", "pipe"]
   });
 
+  let stdout = "";
   let stderr = "";
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk.toString("utf8");
+  });
   child.stderr.on("data", (chunk) => {
     stderr += chunk.toString("utf8");
   });
-  child.stdout.on("data", () => {});
 
   return new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code, signal) => {
-      resolve({ code, signal, stderr });
+      resolve({ code, signal, stdout, stderr });
     });
   });
+}
+
+function formatExecFailure(result, label = "Codex exec") {
+  return (
+    result.stderr.trim() ||
+    (result.signal
+      ? `${label} exited with signal ${result.signal}.`
+      : `${label} exited with code ${result.code}.`)
+  );
+}
+
+function resolveCodexHome(codexHome = null) {
+  const explicitHome = String(codexHome ?? process.env.CODEX_HOME ?? "").trim();
+  return explicitHome || path.join(os.homedir(), ".codex");
+}
+
+export function parseCodexModelCatalog(raw) {
+  const parsed = JSON.parse(String(raw ?? "{}"));
+  const catalog = Array.isArray(parsed?.models) ? parsed.models : null;
+  if (!catalog) {
+    throw new Error("Codex debug models did not return a models array.");
+  }
+
+  return catalog.flatMap((entry) => {
+    const slug = String(entry?.slug ?? "").trim();
+    if (!slug) {
+      return [];
+    }
+
+    return [{
+      slug,
+      displayName: String(entry?.display_name ?? slug).trim() || slug,
+      description:
+        typeof entry?.description === "string" && entry.description.trim()
+          ? entry.description.trim()
+          : null,
+      visibility:
+        typeof entry?.visibility === "string" && entry.visibility.trim()
+          ? entry.visibility.trim()
+          : null,
+      defaultReasoningLevel:
+        typeof entry?.default_reasoning_level === "string" &&
+        entry.default_reasoning_level.trim()
+          ? entry.default_reasoning_level.trim()
+          : null,
+      upgradeModel:
+        typeof entry?.upgrade?.model === "string" && entry.upgrade.model.trim()
+          ? entry.upgrade.model.trim()
+          : null
+    }];
+  });
+}
+
+export async function listCodexModels({
+  codexBin,
+  workspace
+}) {
+  const result = await runCodexExec({
+    codexBin,
+    args: ["debug", "models"],
+    cwd: workspace
+  });
+
+  if (result.code !== 0) {
+    throw new Error(formatExecFailure(result, "Codex debug models"));
+  }
+
+  return parseCodexModelCatalog(result.stdout);
+}
+
+export function parseCodexConfigDefaults(raw) {
+  const defaults = {
+    model: null,
+    modelReasoningEffort: null,
+    profile: null
+  };
+  let insideSection = false;
+
+  for (const line of String(raw ?? "").split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+
+    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      insideSection = true;
+      continue;
+    }
+
+    if (insideSection) {
+      continue;
+    }
+
+    const match = trimmed.match(/^([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"$/u);
+    if (!match) {
+      continue;
+    }
+
+    const [, key, value] = match;
+    switch (key) {
+      case "model":
+        defaults.model = value || null;
+        break;
+      case "model_reasoning_effort":
+        defaults.modelReasoningEffort = value || null;
+        break;
+      case "profile":
+        defaults.profile = value || null;
+        break;
+      default:
+        break;
+    }
+  }
+
+  return defaults;
+}
+
+export async function readCodexConfigDefaults({
+  codexHome = null,
+  configPath = null
+} = {}) {
+  const resolvedPath = configPath
+    ? path.resolve(String(configPath))
+    : path.join(resolveCodexHome(codexHome), "config.toml");
+
+  try {
+    const raw = await fs.readFile(resolvedPath, "utf8");
+    return {
+      ...parseCodexConfigDefaults(raw),
+      path: resolvedPath
+    };
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return {
+        model: null,
+        modelReasoningEffort: null,
+        profile: null,
+        path: resolvedPath
+      };
+    }
+    throw error;
+  }
 }
 
 function validatePermissionRequirements(requirements, permissionLevel) {
@@ -1113,12 +1258,7 @@ export async function classifyVoiceCommandIntent({
       cwd: workspace
     });
     if (result.code !== 0) {
-      throw new Error(
-        result.stderr.trim() ||
-          (result.signal
-            ? `Codex exec exited with signal ${result.signal}.`
-            : `Codex exec exited with code ${result.code}.`)
-      );
+      throw new Error(formatExecFailure(result));
     }
 
     const raw = await fs.readFile(outputPath, "utf8");
@@ -1178,12 +1318,7 @@ export async function classifyProjectIntent({
       cwd: workspace
     });
     if (result.code !== 0) {
-      throw new Error(
-        result.stderr.trim() ||
-          (result.signal
-            ? `Codex exec exited with signal ${result.signal}.`
-            : `Codex exec exited with code ${result.code}.`)
-      );
+      throw new Error(formatExecFailure(result));
     }
 
     const raw = await fs.readFile(outputPath, "utf8");

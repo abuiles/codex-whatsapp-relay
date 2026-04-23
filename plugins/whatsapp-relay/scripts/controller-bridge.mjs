@@ -5,8 +5,10 @@ import {
   classifyProjectIntent as classifyProjectIntentWithCodex,
   classifyVoiceCommandIntent,
   compactCodexThread,
+  listCodexModels,
   listCodexThreads,
   normalizeVoiceCommandIntent,
+  readCodexConfigDefaults,
   readCodexThread,
   startCodexTurn
 } from "./codex-runner.mjs";
@@ -77,6 +79,8 @@ const COMMAND_ALIASES = new Map([
   ["project", "project"],
   ["status", "status"],
   ["st", "status"],
+  ["model", "model"],
+  ["models", "models"],
   ["context", "context"],
   ["ctx", "context"],
   ["compact", "compact"],
@@ -538,6 +542,8 @@ function helpText() {
     "/project -> show the active project for this chat",
     "/project <number|alias|project hint|path hint> -> switch this chat to another project, letting Codex resolve natural project hints against existing projects before auto-adding a repo from a path",
     "/status or /st [project] -> show the current project session or another project's session",
+    "/model [status|reset|global|<slug>] -> inspect or change the active project's model override",
+    "/models [slug] -> list locally visible Codex models or check one model slug",
     "/context or /ctx [project] -> inspect the latest observed context usage for a project session",
     "/compact [project] -> compact a project thread with native Codex compaction",
     "/autocompact [status|on|off|alert on|alert off] [percent] -> manage context alerts and idle auto-compaction",
@@ -557,6 +563,7 @@ function helpText() {
     "",
     "Any other text in this direct chat continues the active project's current Codex session.",
     "If that same project or /btw scope is already busy, prompt-like follow-ups queue automatically and run in order.",
+    "Models inherit in this order: project override -> relay global override -> ~/.codex/config.toml.",
     `Voice notes are transcribed locally with ${DEFAULT_TRANSCRIPTION_PROVIDER} (${DEFAULT_TRANSCRIPTION_MODEL}).`,
     "Short spoken commands are supported for help, status, stop, and new session.",
     "Say or type 'start new session in alpha app inside code directory' to jump into another repo without manually adding it first.",
@@ -750,6 +757,125 @@ function formatContextMonitorStatus(config, prelude = null) {
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function isModelResetToken(value) {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  return ["reset", "inherit", "default", "clear", "none", "auto"].includes(normalized);
+}
+
+function normalizeModelSourceLabel(source) {
+  switch (source) {
+    case "project":
+      return "project override";
+    case "relay":
+      return "relay global override";
+    case "codex":
+      return "Codex config.toml";
+    default:
+      return "Codex built-in default";
+  }
+}
+
+function formatModelSetting(value) {
+  return value ? value : "inherit";
+}
+
+function resolveEffectiveModelState({
+  project = null,
+  config = {},
+  codexDefaults = null
+} = {}) {
+  const projectOverride = project?.model ?? null;
+  const relayOverride = config?.model ?? null;
+  const codexDefault = codexDefaults?.model ?? null;
+  const effectiveModel = projectOverride ?? relayOverride ?? codexDefault ?? null;
+  const source = projectOverride
+    ? "project"
+    : relayOverride
+      ? "relay"
+      : codexDefault
+        ? "codex"
+        : "builtin";
+
+  return {
+    projectOverride,
+    relayOverride,
+    codexDefault,
+    codexDefaultReasoning: codexDefaults?.modelReasoningEffort ?? null,
+    effectiveModel,
+    source,
+    sourceLabel: normalizeModelSourceLabel(source)
+  };
+}
+
+function formatModelSummary(modelState) {
+  return modelState.effectiveModel
+    ? `${modelState.effectiveModel} (${modelState.sourceLabel})`
+    : `inherit (${modelState.sourceLabel})`;
+}
+
+function buildModelStatusLines({
+  activeProjectAlias,
+  project = null,
+  config = {},
+  codexDefaults = null
+} = {}) {
+  const modelState = resolveEffectiveModelState({
+    project,
+    config,
+    codexDefaults
+  });
+
+  return [
+    project ? `project: ${project.alias}` : "scope: global",
+    project && activeProjectAlias && project.alias !== activeProjectAlias
+      ? `active_project: ${activeProjectAlias}`
+      : null,
+    `effective_model: ${modelState.effectiveModel ?? "unknown"}`,
+    `effective_model_source: ${modelState.sourceLabel}`,
+    project ? `project_model_override: ${formatModelSetting(modelState.projectOverride)}` : null,
+    `relay_global_model: ${formatModelSetting(modelState.relayOverride)}`,
+    `codex_default_model: ${formatModelSetting(modelState.codexDefault)}`,
+    modelState.codexDefaultReasoning
+      ? `codex_default_reasoning: ${modelState.codexDefaultReasoning}`
+      : null
+  ].filter(Boolean);
+}
+
+function formatModelStatus({
+  activeProjectAlias,
+  project = null,
+  config = {},
+  codexDefaults = null,
+  prelude = null,
+  activeRun = null
+} = {}) {
+  return [
+    prelude,
+    "Codex model",
+    ...buildModelStatusLines({
+      activeProjectAlias,
+      project,
+      config,
+      codexDefaults
+    }),
+    activeRun
+      ? "Busy note: the current run keeps its existing model; the new model applies on the next turn."
+      : null,
+    "",
+    "Commands: /model, /model gpt-5.4, /model reset, /model global gpt-5.4, /models"
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function formatVisibleModelLabel(model) {
+  const reasoning = model.defaultReasoningLevel ? ` | reasoning: ${model.defaultReasoningLevel}` : "";
+  const upgrade = model.upgradeModel ? ` | upgrade: ${model.upgradeModel}` : "";
+  return `- ${model.slug}${reasoning}${upgrade}`;
 }
 
 export function extractOneShotVoiceReplyRequest(text) {
@@ -955,6 +1081,10 @@ export function parseIncomingCommand(text, captureAllDirectMessages) {
         return { type: "project", payload };
       case "status":
         return { type: "status", payload };
+      case "model":
+        return { type: "model", payload };
+      case "models":
+        return { type: "models", payload };
       case "context":
         return { type: "context", payload };
       case "compact":
@@ -1653,6 +1783,187 @@ function parsePermissionsPayload(payload, config) {
   };
 }
 
+export function parseModelCommandPayload(payload, config) {
+  const tokens = splitPayloadTokens(payload);
+  if (!tokens.length) {
+    return {
+      action: "status",
+      scope: "project",
+      projectAlias: null,
+      model: null,
+      ambiguousProjects: []
+    };
+  }
+
+  const first = tokens[0].toLowerCase();
+  const resolveProjectToken = (token) => {
+    const selection = resolveConfiguredProjectSelection(config, token);
+    if (selection.match) {
+      return {
+        projectAlias: selection.match.alias,
+        ambiguousProjects: []
+      };
+    }
+    if (selection.candidates.length) {
+      return {
+        projectAlias: null,
+        ambiguousProjectToken: token,
+        ambiguousProjects: selection.candidates
+      };
+    }
+    return {
+      projectAlias: null,
+      ambiguousProjects: []
+    };
+  };
+
+  if (first === "status") {
+    if (tokens.length === 1) {
+      return {
+        action: "status",
+        scope: "project",
+        projectAlias: null,
+        model: null,
+        ambiguousProjects: []
+      };
+    }
+    if (tokens[1].toLowerCase() === "global") {
+      return {
+        action: "status",
+        scope: "global",
+        projectAlias: null,
+        model: null,
+        ambiguousProjects: []
+      };
+    }
+    const projectResolution = resolveProjectToken(tokens[1]);
+    return projectResolution.projectAlias || projectResolution.ambiguousProjects.length
+      ? {
+          action: "status",
+          scope: "project",
+          model: null,
+          ...projectResolution
+        }
+      : {
+          action: "unknownProject",
+          scope: "project",
+          projectAlias: null,
+          model: null,
+          projectToken: tokens[1],
+          ambiguousProjects: []
+        };
+  }
+
+  if (first === "global") {
+    if (tokens.length === 1 || tokens[1].toLowerCase() === "status") {
+      return {
+        action: "status",
+        scope: "global",
+        projectAlias: null,
+        model: null,
+        ambiguousProjects: []
+      };
+    }
+    if (isModelResetToken(tokens[1])) {
+      return {
+        action: "reset",
+        scope: "global",
+        projectAlias: null,
+        model: null,
+        ambiguousProjects: []
+      };
+    }
+    return {
+      action: "set",
+      scope: "global",
+      projectAlias: null,
+      model: tokens.slice(1).join(" "),
+      ambiguousProjects: []
+    };
+  }
+
+  if (isModelResetToken(first)) {
+    if (tokens.length === 1) {
+      return {
+        action: "reset",
+        scope: "project",
+        projectAlias: null,
+        model: null,
+        ambiguousProjects: []
+      };
+    }
+    if (tokens[1].toLowerCase() === "global") {
+      return {
+        action: "reset",
+        scope: "global",
+        projectAlias: null,
+        model: null,
+        ambiguousProjects: []
+      };
+    }
+    const projectResolution = resolveProjectToken(tokens[1]);
+    return projectResolution.projectAlias || projectResolution.ambiguousProjects.length
+      ? {
+          action: "reset",
+          scope: "project",
+          model: null,
+          ...projectResolution
+        }
+      : {
+          action: "unknownProject",
+          scope: "project",
+          projectAlias: null,
+          model: null,
+          projectToken: tokens[1],
+          ambiguousProjects: []
+        };
+  }
+
+  if (tokens.length === 1) {
+    const projectResolution = resolveProjectToken(tokens[0]);
+    if (projectResolution.projectAlias || projectResolution.ambiguousProjects.length) {
+      return {
+        action: "status",
+        scope: "project",
+        model: null,
+        ...projectResolution
+      };
+    }
+  }
+
+  if (tokens.length >= 2) {
+    const projectResolution = resolveProjectToken(tokens[0]);
+    if (projectResolution.projectAlias) {
+      const modelToken = tokens.slice(1).join(" ");
+      return {
+        action: isModelResetToken(tokens[1]) ? "reset" : "set",
+        scope: "project",
+        projectAlias: projectResolution.projectAlias,
+        model: isModelResetToken(tokens[1]) ? null : modelToken,
+        ambiguousProjects: []
+      };
+    }
+    if (projectResolution.ambiguousProjects.length) {
+      return {
+        action: "set",
+        scope: "project",
+        projectAlias: null,
+        model: tokens.slice(1).join(" "),
+        ambiguousProjectToken: tokens[0],
+        ambiguousProjects: projectResolution.ambiguousProjects
+      };
+    }
+  }
+
+  return {
+    action: "set",
+    scope: "project",
+    projectAlias: null,
+    model: tokens.join(" "),
+    ambiguousProjects: []
+  };
+}
+
 function formatDangerFullAccessConfirmationCommand({
   projectAlias,
   confirmationCode,
@@ -1709,11 +2020,19 @@ export class WhatsAppControllerBridge {
     this.loggedOutRecoveryAtMs = 0;
     this.loggedOutRecoveryPromise = null;
     this.unsubscribers = [];
+    this.codexDefaults = null;
   }
 
   async initialize() {
     await this.configStore.load();
     await this.stateStore.load();
+    await this.refreshCodexDefaults().catch(() => {});
+  }
+
+  async refreshCodexDefaults() {
+    const defaults = await readCodexConfigDefaults();
+    this.codexDefaults = defaults;
+    return defaults;
   }
 
   getChatSession(phoneKey) {
@@ -2619,7 +2938,21 @@ export class WhatsAppControllerBridge {
         );
         return;
       case "status":
-        await this.sendReply(remoteJid, this.renderSessionStatus(phoneKey, command.payload));
+        await this.sendSessionStatus(phoneKey, remoteJid, command.payload);
+        return;
+      case "model":
+        await this.handleModelCommand({
+          phoneKey,
+          remoteJid,
+          payload: command.payload
+        });
+        return;
+      case "models":
+        await this.handleModelsCommand({
+          phoneKey,
+          remoteJid,
+          payload: command.payload
+        });
         return;
       case "context":
         await this.sendContextStatus(phoneKey, remoteJid, command.payload);
@@ -3000,12 +3333,23 @@ export class WhatsAppControllerBridge {
     );
   }
 
-  renderSessionStatus(phoneKey, payload = "") {
+  async sendSessionStatus(phoneKey, remoteJid, payload = "") {
+    const codexDefaults = await this.refreshCodexDefaults().catch(
+      () => this.codexDefaults ?? null
+    );
+    await this.sendReply(
+      remoteJid,
+      this.renderSessionStatus(phoneKey, payload, { codexDefaults })
+    );
+  }
+
+  renderSessionStatus(phoneKey, payload = "", { codexDefaults = null } = {}) {
     const config = this.configStore.data;
     const chatSession = this.getChatSession(phoneKey);
     const activeProject = this.getActiveProject(phoneKey);
     const voiceReply = resolveSessionVoiceReply(chatSession);
     const target = parseProjectTargetPayload(payload, config);
+    const resolvedCodexDefaults = codexDefaults ?? this.codexDefaults ?? null;
 
     if (target.targetType === "ambiguous") {
       return renderAmbiguousProjectSelectionMessage(payload, target.candidates);
@@ -3017,12 +3361,18 @@ export class WhatsAppControllerBridge {
 
     if (target.targetType === "btw") {
       const btw = this.btwRun(phoneKey);
+      const modelState = resolveEffectiveModelState({
+        project: activeProject,
+        config,
+        codexDefaults: resolvedCodexDefaults
+      });
       return [
         "WhatsApp Codex bridge",
         `active_project: ${activeProject.alias}`,
         "target: btw",
         `busy: ${btw ? "yes" : "no"}`,
         `queued_messages: ${this.queuedPromptCount(phoneKey, { scopeType: "btw" })}`,
+        `model: ${formatModelSummary(modelState)}`,
         `voice_reply: ${formatVoiceReplySummary(voiceReply)}`,
         ...buildActiveRunStatusLines(btw),
         btw?.pendingApproval ? `approval_pending: yes (${btw.pendingApproval.kind})` : null
@@ -3043,6 +3393,11 @@ export class WhatsAppControllerBridge {
     const busyProjects = Object.keys(chatSession.projects ?? {}).filter((alias) =>
       Boolean(this.projectRun(phoneKey, alias))
     );
+    const modelState = resolveEffectiveModelState({
+      project,
+      config,
+      codexDefaults: resolvedCodexDefaults
+    });
 
     return [
       "WhatsApp Codex bridge",
@@ -3054,6 +3409,7 @@ export class WhatsAppControllerBridge {
         scopeType: "project",
         projectAlias: project.alias
       })}`,
+      `model: ${formatModelSummary(modelState)}`,
       `permissions: ${permissionLevel}`,
       `voice_reply: ${formatVoiceReplySummary(voiceReply)}`,
       `voice_reply_provider: ${resolveConfiguredTtsProvider(config)}`,
@@ -3072,7 +3428,7 @@ export class WhatsAppControllerBridge {
       projectSession.lastPromptAt ? `last_prompt_at: ${projectSession.lastPromptAt}` : null,
       projectSession.lastReplyAt ? `last_reply_at: ${projectSession.lastReplyAt}` : null,
       "",
-      "Commands: /project, /ctx, /compact, /autocompact, /in, /btw, /n, /ls, /session, /p, /ro, /ww, /dfa, /voice, /x, /h"
+      "Commands: /project, /model, /models, /ctx, /compact, /autocompact, /in, /btw, /n, /ls, /session, /p, /ro, /ww, /dfa, /voice, /x, /h"
     ]
       .filter(Boolean)
       .join("\n");
@@ -3267,6 +3623,246 @@ export class WhatsAppControllerBridge {
     await this.sendReply(
       remoteJid,
       formatContextMonitorStatus(updated, "Context monitor updated.")
+    );
+  }
+
+  async handleModelCommand({ phoneKey, remoteJid, payload = "" }) {
+    const config = this.configStore.data;
+    const activeProject = this.getActiveProject(phoneKey);
+    const parsed = parseModelCommandPayload(payload, config);
+    if (parsed.ambiguousProjects?.length) {
+      await this.sendReply(
+        remoteJid,
+        renderAmbiguousProjectSelectionMessage(
+          parsed.ambiguousProjectToken,
+          parsed.ambiguousProjects
+        )
+      );
+      return;
+    }
+
+    if (parsed.action === "unknownProject") {
+      await this.sendReply(
+        remoteJid,
+        `Unknown project "${parsed.projectToken}". Use /projects to inspect available aliases.`
+      );
+      return;
+    }
+
+    const codexDefaults = await this.refreshCodexDefaults().catch(
+      () => this.codexDefaults ?? null
+    );
+    const project =
+      parsed.scope === "project"
+        ? resolveConfiguredProject(config, parsed.projectAlias ?? activeProject.alias)
+        : null;
+
+    if (parsed.action === "status") {
+      await this.sendReply(
+        remoteJid,
+        formatModelStatus({
+          activeProjectAlias: activeProject.alias,
+          project,
+          config,
+          codexDefaults
+        })
+      );
+      return;
+    }
+
+    if (parsed.action === "reset") {
+      if (parsed.scope === "global") {
+        const updated = await this.configStore.update({
+          model: null
+        });
+        await this.sendReply(
+          remoteJid,
+          formatModelStatus({
+            activeProjectAlias: activeProject.alias,
+            project: null,
+            config: updated,
+            codexDefaults,
+            prelude: "Relay global model override cleared."
+          })
+        );
+        return;
+      }
+
+      const activeRun = this.projectRun(phoneKey, project.alias);
+      const updated = await this.configStore.mutate((data) => {
+        const index = data.projects.findIndex(
+          (entry) => normalizeProjectAlias(entry.alias) === project.alias
+        );
+        if (index >= 0) {
+          data.projects[index].model = null;
+        }
+      });
+      await this.sendReply(
+        remoteJid,
+        formatModelStatus({
+          activeProjectAlias: activeProject.alias,
+          project: resolveConfiguredProject(updated, project.alias),
+          config: updated,
+          codexDefaults,
+          prelude: `Model override cleared for project ${project.alias}.`,
+          activeRun
+        })
+      );
+      return;
+    }
+
+    const requestedModel = String(parsed.model ?? "").trim();
+    if (!requestedModel) {
+      await this.sendReply(
+        remoteJid,
+        "Usage: /model, /model <slug>, /model reset, /model <project> <slug>, /model global <slug>, /model global reset."
+      );
+      return;
+    }
+
+    let visibleModels;
+    try {
+      visibleModels = await listCodexModels({
+        codexBin: config.codexBin,
+        workspace: project?.workspace ?? activeProject.workspace
+      });
+    } catch (error) {
+      await this.sendReply(
+        remoteJid,
+        [
+          "I couldn't verify the locally visible Codex models right now.",
+          error?.message ?? String(error)
+        ].join("\n")
+      );
+      return;
+    }
+
+    const requestedVisible = visibleModels.some((entry) => entry.slug === requestedModel);
+    if (!requestedVisible) {
+      const visibleSlugs = visibleModels.map((entry) => entry.slug).slice(0, 12);
+      await this.sendReply(
+        remoteJid,
+        [
+          `Model ${requestedModel} is not visible on this machine/account right now.`,
+          visibleSlugs.length
+            ? `Visible models: ${visibleSlugs.join(", ")}`
+            : "No visible models were returned by codex debug models.",
+          "Use /models to inspect the current catalog."
+        ].join("\n")
+      );
+      return;
+    }
+
+    if (parsed.scope === "global") {
+      const updated = await this.configStore.update({
+        model: requestedModel
+      });
+      await this.sendReply(
+        remoteJid,
+        formatModelStatus({
+          activeProjectAlias: activeProject.alias,
+          project: null,
+          config: updated,
+          codexDefaults,
+          prelude: `Relay global model is now ${requestedModel}.`
+        })
+      );
+      return;
+    }
+
+    const activeRun = this.projectRun(phoneKey, project.alias);
+    const updated = await this.configStore.mutate((data) => {
+      const index = data.projects.findIndex(
+        (entry) => normalizeProjectAlias(entry.alias) === project.alias
+      );
+      if (index >= 0) {
+        data.projects[index].model = requestedModel;
+      }
+    });
+    await this.sendReply(
+      remoteJid,
+      formatModelStatus({
+        activeProjectAlias: activeProject.alias,
+        project: resolveConfiguredProject(updated, project.alias),
+        config: updated,
+        codexDefaults,
+        prelude: `Model for project ${project.alias} is now ${requestedModel}.`,
+        activeRun
+      })
+    );
+  }
+
+  async handleModelsCommand({ phoneKey, remoteJid, payload = "" }) {
+    const config = this.configStore.data;
+    const activeProject = this.getActiveProject(phoneKey);
+    const codexDefaults = await this.refreshCodexDefaults().catch(
+      () => this.codexDefaults ?? null
+    );
+    const modelState = resolveEffectiveModelState({
+      project: activeProject,
+      config,
+      codexDefaults
+    });
+    const requestedModel = String(payload ?? "").trim();
+
+    let visibleModels;
+    try {
+      visibleModels = await listCodexModels({
+        codexBin: config.codexBin,
+        workspace: activeProject.workspace
+      });
+    } catch (error) {
+      await this.sendReply(
+        remoteJid,
+        [
+          "I couldn't query the local Codex model catalog.",
+          error?.message ?? String(error)
+        ].join("\n")
+      );
+      return;
+    }
+
+    if (requestedModel) {
+      const match = visibleModels.find((entry) => entry.slug === requestedModel) ?? null;
+      await this.sendReply(
+        remoteJid,
+        [
+          "Codex model check",
+          `requested: ${requestedModel}`,
+          `available: ${match ? "yes" : "no"}`,
+          `active_project: ${activeProject.alias}`,
+          `effective_model: ${modelState.effectiveModel ?? "unknown"}`,
+          `effective_model_source: ${modelState.sourceLabel}`,
+          match ? formatVisibleModelLabel(match) : null,
+          "",
+          "Use /models to list visible models."
+        ]
+          .filter(Boolean)
+          .join("\n")
+      );
+      return;
+    }
+
+    await this.sendReply(
+      remoteJid,
+      [
+        "Codex models visible locally",
+        `active_project: ${activeProject.alias}`,
+        `effective_model: ${modelState.effectiveModel ?? "unknown"}`,
+        `effective_model_source: ${modelState.sourceLabel}`,
+        `relay_global_model: ${formatModelSetting(config.model)}`,
+        `project_model_override: ${formatModelSetting(activeProject.model)}`,
+        `codex_default_model: ${formatModelSetting(codexDefaults?.model ?? null)}`,
+        codexDefaults?.modelReasoningEffort
+          ? `codex_default_reasoning: ${codexDefaults.modelReasoningEffort}`
+          : null,
+        "",
+        ...visibleModels.map((entry) => formatVisibleModelLabel(entry)),
+        "",
+        "Use /model <slug> for the active project, /model global <slug> for the relay default, or /models gpt-5.5 to check one slug."
+      ]
+        .filter(Boolean)
+        .join("\n")
     );
   }
 
