@@ -4,12 +4,15 @@ import { setTimeout as delay } from "node:timers/promises";
 import {
   classifyProjectIntent as classifyProjectIntentWithCodex,
   classifyVoiceCommandIntent,
+  compactCodexThread,
   listCodexThreads,
   normalizeVoiceCommandIntent,
+  readCodexThread,
   startCodexTurn
 } from "./codex-runner.mjs";
 import {
   ControllerConfigStore,
+  normalizePercentThreshold,
   resolvePhoneKeyFromJid
 } from "./controller-config.mjs";
 import {
@@ -31,6 +34,7 @@ import { ControllerStateStore, defaultProjectSession } from "./controller-state.
 import { extractAudioMessage, extractMessageText, extractMessageType } from "./store.mjs";
 import {
   DEFAULT_TRANSCRIPTION_MODEL,
+  DEFAULT_TRANSCRIPTION_PROVIDER,
   transcribeVoiceNote
 } from "./voice-transcriber.mjs";
 import {
@@ -56,6 +60,8 @@ const VOICE_REPLY_LANGUAGE_TAG =
 const MARKDOWN_LINK_PATTERN = /\[([^\]]+)\]\(([^)]+)\)/g;
 const FENCED_CODE_BLOCK_PATTERN = /```(?:[\w-]+)?\n?([\s\S]*?)```/g;
 const ACTIONABLE_URL_PATTERN = /https?:\/\/\S+/i;
+const DEFAULT_CONTEXT_ALERT_THRESHOLD_PERCENT = 75;
+const DEFAULT_CONTEXT_AUTO_COMPACT_THRESHOLD_PERCENT = 80;
 
 function invalidControllerCommandError(message) {
   const error = new Error(message);
@@ -71,6 +77,13 @@ const COMMAND_ALIASES = new Map([
   ["project", "project"],
   ["status", "status"],
   ["st", "status"],
+  ["context", "context"],
+  ["ctx", "context"],
+  ["compact", "compact"],
+  ["autocompact", "contextMonitor"],
+  ["auto-compact", "contextMonitor"],
+  ["ctxmon", "contextMonitor"],
+  ["ac", "contextMonitor"],
   ["in", "projectPrompt"],
   ["btw", "btw"],
   ["new", "new"],
@@ -187,6 +200,166 @@ function buildActiveRunStatusLines(activeRun) {
   ].filter(Boolean);
 }
 
+function formatCount(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed)
+    ? new Intl.NumberFormat("en-US", {
+        maximumFractionDigits: 0
+      }).format(parsed)
+    : null;
+}
+
+function normalizeOptionalFiniteNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeTokenUsageBreakdown(value = {}) {
+  return {
+    totalTokens: normalizeOptionalFiniteNumber(value.totalTokens) ?? 0,
+    inputTokens: normalizeOptionalFiniteNumber(value.inputTokens) ?? 0,
+    cachedInputTokens: normalizeOptionalFiniteNumber(value.cachedInputTokens) ?? 0,
+    outputTokens: normalizeOptionalFiniteNumber(value.outputTokens) ?? 0,
+    reasoningOutputTokens: normalizeOptionalFiniteNumber(value.reasoningOutputTokens) ?? 0
+  };
+}
+
+function normalizeThreadTokenUsage(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  return {
+    total: normalizeTokenUsageBreakdown(value.total),
+    last: normalizeTokenUsageBreakdown(value.last),
+    modelContextWindow: normalizeOptionalFiniteNumber(value.modelContextWindow)
+  };
+}
+
+function computeContextUsageSummary(tokenUsage) {
+  const normalized = normalizeThreadTokenUsage(tokenUsage);
+  if (!normalized) {
+    return null;
+  }
+
+  const cumulativeTokens = normalized.total.totalTokens;
+  const lastTurnTokens = normalized.last.totalTokens;
+  const windowTokens = normalized.modelContextWindow;
+  const lastTurnPercent =
+    Number.isFinite(windowTokens) && windowTokens > 0
+      ? (lastTurnTokens / windowTokens) * 100
+      : null;
+  const cumulativePercent =
+    Number.isFinite(windowTokens) && windowTokens > 0
+      ? (cumulativeTokens / windowTokens) * 100
+      : null;
+
+  return {
+    ...normalized,
+    usedTokens: lastTurnTokens,
+    cumulativeTokens,
+    lastTurnTokens,
+    windowTokens,
+    percentUsed: lastTurnPercent,
+    lastTurnPercent,
+    cumulativePercent
+  };
+}
+
+function formatPercent(value, digits = 1) {
+  return Number.isFinite(value) ? `${value.toFixed(digits)}%` : "unknown";
+}
+
+function buildContextUsageLines(tokenUsage, { observedAt = null, lastCompactedAt = null } = {}) {
+  const summary = computeContextUsageSummary(tokenUsage);
+  if (!summary) {
+    return observedAt || lastCompactedAt
+      ? [
+          observedAt ? `context_usage_observed_at: ${observedAt}` : null,
+          lastCompactedAt ? `last_compacted_at: ${lastCompactedAt}` : null
+        ].filter(Boolean)
+      : [];
+  }
+
+  const usageLine = Number.isFinite(summary.lastTurnPercent)
+    ? `last_turn_context_usage: ${formatPercent(summary.lastTurnPercent)} of ${formatCount(summary.windowTokens)} tokens (${formatCount(summary.lastTurnTokens)} used in last turn)`
+    : `last_turn_context_tokens: ${formatCount(summary.lastTurnTokens)} observed`;
+  const cumulativeLine = Number.isFinite(summary.cumulativePercent)
+    ? `cumulative_context_tokens: ${formatCount(summary.cumulativeTokens)} observed historically (${formatPercent(summary.cumulativePercent)} of the window cumulatively, not live usage)`
+    : `cumulative_context_tokens: ${formatCount(summary.cumulativeTokens)} observed historically`;
+
+  const lines = [
+    usageLine,
+    cumulativeLine,
+    observedAt ? `context_usage_observed_at: ${observedAt}` : null,
+    `last_turn_tokens: ${formatCount(summary.last.totalTokens)}`,
+    `input_tokens: ${formatCount(summary.total.inputTokens)}`,
+    summary.total.cachedInputTokens
+      ? `cached_input_tokens: ${formatCount(summary.total.cachedInputTokens)}`
+      : null,
+    `output_tokens: ${formatCount(summary.total.outputTokens)}`,
+    summary.total.reasoningOutputTokens
+      ? `reasoning_tokens: ${formatCount(summary.total.reasoningOutputTokens)}`
+      : null,
+    lastCompactedAt ? `last_compacted_at: ${lastCompactedAt}` : null
+  ];
+
+  if (
+    observedAt &&
+    lastCompactedAt &&
+    Date.parse(lastCompactedAt) > Date.parse(observedAt)
+  ) {
+    lines.push("context_usage_note: token usage was observed before the last compaction");
+  }
+
+  return lines.filter(Boolean);
+}
+
+function resolveContextMonitorSettings(config = {}) {
+  return {
+    alertsEnabled: config.contextAlertsEnabled !== false,
+    alertThresholdPercent: normalizePercentThreshold(
+      config.contextAlertThresholdPercent,
+      DEFAULT_CONTEXT_ALERT_THRESHOLD_PERCENT
+    ),
+    autoCompactEnabled: config.contextAutoCompactEnabled === true,
+    autoCompactThresholdPercent: normalizePercentThreshold(
+      config.contextAutoCompactThresholdPercent,
+      DEFAULT_CONTEXT_AUTO_COMPACT_THRESHOLD_PERCENT
+    )
+  };
+}
+
+function buildContextMonitorLines(config = {}) {
+  const settings = resolveContextMonitorSettings(config);
+  return [
+    `context_alert: ${settings.alertsEnabled ? "on" : "off"} at ${formatPercent(settings.alertThresholdPercent, 0)} last-turn usage`,
+    `context_auto_compact: ${settings.autoCompactEnabled ? "on" : "off"} at ${formatPercent(settings.autoCompactThresholdPercent, 0)} last-turn usage`
+  ];
+}
+
+function contextPressureFromTokenUsage(tokenUsage) {
+  const summary = computeContextUsageSummary(tokenUsage);
+  if (
+    !summary ||
+    !Number.isFinite(summary.lastTurnPercent) ||
+    !Number.isFinite(summary.windowTokens) ||
+    summary.windowTokens <= 0
+  ) {
+    return null;
+  }
+
+  return summary;
+}
+
+function latestContextSignal(projectSession, activeRun) {
+  return {
+    tokenUsage: normalizeThreadTokenUsage(activeRun?.lastTokenUsage ?? projectSession?.lastTokenUsage),
+    tokenUsageAt: activeRun?.lastTokenUsageAt ?? projectSession?.lastTokenUsageAt ?? null,
+    lastCompactedAt: activeRun?.lastCompactedAt ?? projectSession?.lastCompactedAt ?? null
+  };
+}
+
 export function applyRunLifecycleEvent(activeRun, event, timestamp = new Date().toISOString()) {
   if (!activeRun || !event || typeof event !== "object") {
     return activeRun;
@@ -216,6 +389,15 @@ export function applyRunLifecycleEvent(activeRun, event, timestamp = new Date().
       return activeRun;
     case "approvalResolved":
       activeRun.status = "running";
+      return activeRun;
+    case "tokenUsageUpdated":
+      activeRun.threadId = activeRun.threadId ?? event.threadId ?? null;
+      activeRun.lastTokenUsage = normalizeThreadTokenUsage(event.tokenUsage);
+      activeRun.lastTokenUsageAt = timestamp;
+      return activeRun;
+    case "contextCompactionCompleted":
+      activeRun.threadId = activeRun.threadId ?? event.threadId ?? null;
+      activeRun.lastCompactedAt = event.compactedAt ?? timestamp;
       return activeRun;
     case "turnCompleted":
       activeRun.status = event.status === "completed" ? "completed" : String(event.status);
@@ -255,6 +437,34 @@ function formatThreadTimestamp(value) {
 
   const timestamp = value > 1_000_000_000_000 ? value : value * 1000;
   return new Date(timestamp).toISOString();
+}
+
+function extractLatestCompactionAtFromThread(thread) {
+  if (!thread || typeof thread !== "object" || !Array.isArray(thread.turns)) {
+    return null;
+  }
+
+  let latestAt = null;
+  for (const turn of thread.turns) {
+    if (!Array.isArray(turn?.items)) {
+      continue;
+    }
+
+    if (!turn.items.some((item) => item?.type === "contextCompaction")) {
+      continue;
+    }
+
+    const timestamp = formatThreadTimestamp(turn.completedAt ?? turn.startedAt);
+    if (!timestamp) {
+      continue;
+    }
+
+    if (!latestAt || Date.parse(timestamp) > Date.parse(latestAt)) {
+      latestAt = timestamp;
+    }
+  }
+
+  return latestAt;
 }
 
 function sanitizeThreadPreview(value) {
@@ -328,6 +538,9 @@ function helpText() {
     "/project -> show the active project for this chat",
     "/project <number|alias|project hint|path hint> -> switch this chat to another project, letting Codex resolve natural project hints against existing projects before auto-adding a repo from a path",
     "/status or /st [project] -> show the current project session or another project's session",
+    "/context or /ctx [project] -> inspect the latest observed context usage for a project session",
+    "/compact [project] -> compact a project thread with native Codex compaction",
+    "/autocompact [status|on|off|alert on|alert off] [percent] -> manage context alerts and idle auto-compaction",
     "/new or /n [prompt] -> start a fresh session in the active project, optionally with a first prompt",
     "/in <project> <prompt> -> send a one-off prompt to another project without switching",
     "/btw <prompt> -> ask a disposable side question and then return to your current project",
@@ -344,7 +557,7 @@ function helpText() {
     "",
     "Any other text in this direct chat continues the active project's current Codex session.",
     "If that same project or /btw scope is already busy, prompt-like follow-ups queue automatically and run in order.",
-    `Voice notes are transcribed locally with ${DEFAULT_TRANSCRIPTION_MODEL}.`,
+    `Voice notes are transcribed locally with ${DEFAULT_TRANSCRIPTION_PROVIDER} (${DEFAULT_TRANSCRIPTION_MODEL}).`,
     "Short spoken commands are supported for help, status, stop, and new session.",
     "Say or type 'start new session in alpha app inside code directory' to jump into another repo without manually adding it first.",
     "Prefix a prompt with 'reply in voice at 1x' or 'reply in voice at 2x' for a one-off spoken reply."
@@ -433,6 +646,112 @@ export function parseVoiceReplyCommandPayload(payload) {
   return { action: "unknown" };
 }
 
+function extractPercentToken(tokens, fallback) {
+  for (const token of tokens) {
+    const match = String(token ?? "").match(/^(\d+(?:[.,]\d+)?)%?$/);
+    if (!match) {
+      continue;
+    }
+
+    return normalizePercentThreshold(match[1].replace(",", "."), fallback);
+  }
+
+  return null;
+}
+
+export function parseContextMonitorCommandPayload(payload, config = {}) {
+  const trimmed = String(payload ?? "").trim();
+  const settings = resolveContextMonitorSettings(config);
+  if (!trimmed || normalizeVoiceCommandText(trimmed) === "status") {
+    return { action: "status" };
+  }
+
+  const rawTokens = trimmed.split(/\s+/).filter(Boolean);
+  const tokens = rawTokens.map((token) => normalizeVoiceCommandText(token));
+  const [first = "", second = ""] = tokens;
+
+  if (first === "alert" || first === "alerts" || first === "alerte") {
+    const percent = extractPercentToken(rawTokens.slice(1), settings.alertThresholdPercent);
+    if (["on", "enable", "enabled", "active", "activer"].includes(second)) {
+      return {
+        action: "alertOn",
+        thresholdPercent: percent
+      };
+    }
+    if (["off", "disable", "disabled", "inactive", "desactiver"].includes(second)) {
+      return { action: "alertOff" };
+    }
+    if (percent) {
+      return {
+        action: "alertThreshold",
+        thresholdPercent: percent
+      };
+    }
+    return { action: "unknown" };
+  }
+
+  if (first === "threshold" || first === "seuil") {
+    const percent = extractPercentToken(rawTokens.slice(1), settings.autoCompactThresholdPercent);
+    return percent
+      ? {
+          action: "autoThreshold",
+          thresholdPercent: percent
+        }
+      : { action: "unknown" };
+  }
+
+  if (first === "auto") {
+    const percent = extractPercentToken(rawTokens.slice(1), settings.autoCompactThresholdPercent);
+    if (["on", "enable", "enabled", "active", "activer"].includes(second)) {
+      return {
+        action: "autoOn",
+        thresholdPercent: percent
+      };
+    }
+    if (["off", "disable", "disabled", "inactive", "desactiver"].includes(second)) {
+      return { action: "autoOff" };
+    }
+    if (percent) {
+      return {
+        action: "autoOn",
+        thresholdPercent: percent
+      };
+    }
+  }
+
+  const percent = extractPercentToken(rawTokens, settings.autoCompactThresholdPercent);
+  if (["on", "enable", "enabled", "active", "activer"].includes(first)) {
+    return {
+      action: "autoOn",
+      thresholdPercent: percent
+    };
+  }
+  if (["off", "disable", "disabled", "inactive", "desactiver"].includes(first)) {
+    return { action: "autoOff" };
+  }
+  if (percent) {
+    return {
+      action: "autoThreshold",
+      thresholdPercent: percent
+    };
+  }
+
+  return { action: "unknown" };
+}
+
+function formatContextMonitorStatus(config, prelude = null) {
+  return [
+    prelude,
+    "Context monitor",
+    ...buildContextMonitorLines(config),
+    "",
+    "Basis: last_turn_context_usage = last turn tokens / model context window.",
+    "Commands: /autocompact on [80], /autocompact off, /autocompact alert on [75], /autocompact alert off."
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 export function extractOneShotVoiceReplyRequest(text) {
   const source = String(text ?? "").trim();
   if (!source) {
@@ -483,7 +802,7 @@ export function buildVoiceReplyPrompt(prompt) {
     "- Your final answer will be converted into a WhatsApp voice note.",
     "- Reply in the same language as the user.",
     "- Start your final answer with a single metadata line exactly like [[reply_language:<language-code>]].",
-    "- Replace <language-code> with the language you are actually replying in, for example en, es, it, or pt-BR.",
+    "- Replace <language-code> with the language you are actually replying in, for example fr, en, es, it, or pt-BR.",
     "- Put the real answer after that metadata line and do not mention the metadata.",
     "- Write in plain, natural prose that sounds good when spoken aloud.",
     "- If the answer is short, give the full answer.",
@@ -534,6 +853,12 @@ function parseThreadShortcutIndex(value) {
 function isFreshThreadShortcutList(session = {}) {
   const storedAt = Date.parse(session.lastThreadChoicesAt ?? "");
   return Number.isFinite(storedAt) && storedAt + THREAD_SHORTCUT_TTL_MS > Date.now();
+}
+
+function shouldIgnoreInboundSystemMessage(messageType) {
+  return new Set([
+    "protocolMessage"
+  ]).has(String(messageType ?? "").trim());
 }
 
 function resolveStoredThreadShortcut(session = {}, token) {
@@ -630,6 +955,12 @@ export function parseIncomingCommand(text, captureAllDirectMessages) {
         return { type: "project", payload };
       case "status":
         return { type: "status", payload };
+      case "context":
+        return { type: "context", payload };
+      case "compact":
+        return { type: "compact", payload };
+      case "contextMonitor":
+        return { type: "contextMonitor", payload };
       case "new":
         return { type: "new", prompt: payload };
       case "projectPrompt":
@@ -2108,6 +2439,10 @@ export class WhatsAppControllerBridge {
     }
 
     const messageType = extractMessageType(message.message);
+    if (shouldIgnoreInboundSystemMessage(messageType)) {
+      return;
+    }
+
     const audioMessage = extractAudioMessage(message.message);
     const extractedText = extractMessageText(message.message).trim();
     let text = audioMessage ? "" : extractedText;
@@ -2152,6 +2487,7 @@ export class WhatsAppControllerBridge {
           lastInboundText: text,
           lastInboundType: "voice",
           lastVoiceTranscriptAt: new Date().toISOString(),
+          lastVoiceTranscriptProvider: transcription.provider,
           lastVoiceTranscriptModel: transcription.model,
           lastVoiceTranscriptConfidence: transcription.avgConfidence,
           lastVoiceTranscriptMinConfidence: transcription.minConfidence
@@ -2284,6 +2620,22 @@ export class WhatsAppControllerBridge {
         return;
       case "status":
         await this.sendReply(remoteJid, this.renderSessionStatus(phoneKey, command.payload));
+        return;
+      case "context":
+        await this.sendContextStatus(phoneKey, remoteJid, command.payload);
+        return;
+      case "compact":
+        await this.handleCompactCommand({
+          phoneKey,
+          remoteJid,
+          payload: command.payload
+        });
+        return;
+      case "contextMonitor":
+        await this.handleContextMonitorCommand({
+          remoteJid,
+          payload: command.payload
+        });
         return;
       case "stop":
         await this.stopActiveRun(phoneKey, remoteJid, command.payload);
@@ -2683,6 +3035,7 @@ export class WhatsAppControllerBridge {
     const projectSession = chatSession.projects?.[project.alias] ?? defaultProjectSession();
     const activeRun = this.projectRun(phoneKey, project.alias);
     const permissionLevel = resolveSessionPermissionLevel(config, project, projectSession);
+    const contextSignal = latestContextSignal(projectSession, activeRun);
     const pendingConfirmation =
       isConfirmationFresh(projectSession) && projectSession.pendingPermissionConfirmation
         ? projectSession.pendingPermissionConfirmation
@@ -2704,9 +3057,14 @@ export class WhatsAppControllerBridge {
       `permissions: ${permissionLevel}`,
       `voice_reply: ${formatVoiceReplySummary(voiceReply)}`,
       `voice_reply_provider: ${resolveConfiguredTtsProvider(config)}`,
+      ...buildContextMonitorLines(config),
       busyProjects.length ? `busy_projects: ${busyProjects.join(", ")}` : null,
       this.btwRun(phoneKey) ? "btw_busy: yes" : null,
       ...buildActiveRunStatusLines(activeRun),
+      ...buildContextUsageLines(contextSignal.tokenUsage, {
+        observedAt: contextSignal.tokenUsageAt,
+        lastCompactedAt: contextSignal.lastCompactedAt
+      }),
       activeRun?.pendingApproval ? `approval_pending: yes (${activeRun.pendingApproval.kind})` : null,
       pendingConfirmation
         ? `danger_full_access_confirmation: pending until ${pendingConfirmation.expiresAt}`
@@ -2714,10 +3072,429 @@ export class WhatsAppControllerBridge {
       projectSession.lastPromptAt ? `last_prompt_at: ${projectSession.lastPromptAt}` : null,
       projectSession.lastReplyAt ? `last_reply_at: ${projectSession.lastReplyAt}` : null,
       "",
-      "Commands: /project, /in, /btw, /n, /ls, /session, /p, /ro, /ww, /dfa, /voice, /x, /h"
+      "Commands: /project, /ctx, /compact, /autocompact, /in, /btw, /n, /ls, /session, /p, /ro, /ww, /dfa, /voice, /x, /h"
     ]
       .filter(Boolean)
       .join("\n");
+  }
+
+  async refreshProjectContextSnapshot(phoneKey, project, projectSession) {
+    if (!projectSession?.threadId) {
+      return {
+        session: projectSession ?? defaultProjectSession(),
+        thread: null
+      };
+    }
+
+    try {
+      const thread = await readCodexThread({
+        codexBin: this.configStore.data.codexBin,
+        workspace: project.workspace,
+        threadId: projectSession.threadId,
+        model: project.model ?? this.configStore.data.model,
+        profile: project.profile ?? this.configStore.data.profile,
+        search: project.search ?? this.configStore.data.search,
+        includeTurns: true
+      });
+      const latestCompactedAt = extractLatestCompactionAtFromThread(thread);
+      const patch = {};
+
+      if (thread?.name && thread.name !== projectSession.connectedThreadName) {
+        patch.connectedThreadName = thread.name;
+      }
+      if (
+        latestCompactedAt &&
+        latestCompactedAt !== projectSession.lastCompactedAt
+      ) {
+        patch.lastCompactedAt = latestCompactedAt;
+      }
+
+      if (Object.keys(patch).length) {
+        await this.upsertProjectSession(phoneKey, project.alias, {
+          projectPatch: patch
+        });
+      }
+
+      return {
+        session:
+          this.getChatSession(phoneKey).projects?.[project.alias] ?? defaultProjectSession(),
+        thread
+      };
+    } catch {
+      return {
+        session: this.getChatSession(phoneKey).projects?.[project.alias] ?? projectSession,
+        thread: null
+      };
+    }
+  }
+
+  async sendContextStatus(phoneKey, remoteJid, payload = "") {
+    const config = this.configStore.data;
+    const activeProject = this.getActiveProject(phoneKey);
+    const target = parseProjectTargetPayload(payload, config);
+
+    if (target.targetType === "ambiguous") {
+      await this.sendReply(
+        remoteJid,
+        renderAmbiguousProjectSelectionMessage(payload, target.candidates)
+      );
+      return;
+    }
+
+    if (target.targetType === "unknown") {
+      await this.sendReply(
+        remoteJid,
+        `Unknown project "${String(payload).trim()}". Use /projects to inspect available aliases.`
+      );
+      return;
+    }
+
+    if (target.targetType === "btw") {
+      await this.sendReply(
+        remoteJid,
+        "Context inspection is only available for project sessions right now. Use /ctx or /ctx <project>."
+      );
+      return;
+    }
+
+    const project = resolveConfiguredProject(config, target.projectAlias ?? activeProject.alias);
+    const { session: initialSession } = this.getProjectSession(phoneKey, project.alias);
+    const activeRun = this.projectRun(phoneKey, project.alias);
+    const { session: projectSession, thread } = activeRun
+      ? {
+          session: initialSession,
+          thread: null
+        }
+      : await this.refreshProjectContextSnapshot(phoneKey, project, initialSession);
+
+    const currentThreadId = activeRun?.threadId ?? projectSession.threadId ?? null;
+    const contextSignal = latestContextSignal(projectSession, activeRun);
+    const threadName = projectSession.connectedThreadName ?? thread?.name ?? null;
+
+    if (!currentThreadId) {
+      await this.sendReply(
+        remoteJid,
+        [
+          `Project: ${project.alias}`,
+          "session: none",
+          "",
+          "No Codex thread exists for this project yet.",
+          "Send a normal message first, then use /ctx again."
+        ].join("\n")
+      );
+      return;
+    }
+
+    const lines = [
+      "WhatsApp Codex context",
+      `active_project: ${activeProject.alias}`,
+      `project: ${project.alias}`,
+      `session: ${shortThreadId(currentThreadId)}`,
+      `busy: ${activeRun ? "yes" : "no"}`,
+      threadName ? `thread_name: ${threadName}` : null,
+      ...buildContextMonitorLines(config),
+      ...buildContextUsageLines(contextSignal.tokenUsage, {
+        observedAt: contextSignal.tokenUsageAt,
+        lastCompactedAt: contextSignal.lastCompactedAt
+      }),
+      !contextSignal.tokenUsage
+        ? "context_usage: no token usage has been observed for this session since the relay patch"
+        : null,
+      "",
+      activeRun
+        ? "Tip: wait for the current run to finish before compacting."
+        : `Tip: use /compact${project.alias === activeProject.alias ? "" : ` ${project.alias}`} to compact this thread.`
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    await this.sendReply(remoteJid, lines);
+  }
+
+  async handleContextMonitorCommand({ remoteJid, payload = "" }) {
+    const parsed = parseContextMonitorCommandPayload(payload, this.configStore.data);
+    if (parsed.action === "unknown") {
+      await this.sendReply(
+        remoteJid,
+        formatContextMonitorStatus(
+          this.configStore.data,
+          "Usage not understood for /autocompact."
+        )
+      );
+      return;
+    }
+
+    if (parsed.action === "status") {
+      await this.sendReply(remoteJid, formatContextMonitorStatus(this.configStore.data));
+      return;
+    }
+
+    const patch = {};
+    switch (parsed.action) {
+      case "alertOn":
+        patch.contextAlertsEnabled = true;
+        if (parsed.thresholdPercent) {
+          patch.contextAlertThresholdPercent = parsed.thresholdPercent;
+        }
+        break;
+      case "alertOff":
+        patch.contextAlertsEnabled = false;
+        break;
+      case "alertThreshold":
+        patch.contextAlertsEnabled = true;
+        patch.contextAlertThresholdPercent = parsed.thresholdPercent;
+        break;
+      case "autoOn":
+        patch.contextAutoCompactEnabled = true;
+        if (parsed.thresholdPercent) {
+          patch.contextAutoCompactThresholdPercent = parsed.thresholdPercent;
+        }
+        break;
+      case "autoOff":
+        patch.contextAutoCompactEnabled = false;
+        break;
+      case "autoThreshold":
+        patch.contextAutoCompactEnabled = true;
+        patch.contextAutoCompactThresholdPercent = parsed.thresholdPercent;
+        break;
+      default:
+        break;
+    }
+
+    const updated = Object.keys(patch).length
+      ? await this.configStore.update(patch)
+      : this.configStore.data;
+    await this.sendReply(
+      remoteJid,
+      formatContextMonitorStatus(updated, "Context monitor updated.")
+    );
+  }
+
+  async compactProjectSession({ phoneKey, project, projectSession }) {
+    const config = this.configStore.data;
+    const result = await compactCodexThread({
+      codexBin: config.codexBin,
+      workspace: project.workspace,
+      threadId: projectSession.threadId,
+      model: project.model ?? config.model,
+      profile: project.profile ?? config.profile,
+      search: project.search ?? config.search
+    });
+
+    const observedCompactedAt =
+      result.lastCompactedAt ?? extractLatestCompactionAtFromThread(result.thread);
+    await this.upsertProjectSession(phoneKey, project.alias, {
+      projectPatch: {
+        connectedThreadName: result.thread?.name ?? projectSession.connectedThreadName,
+        lastCompactedAt: observedCompactedAt ?? projectSession.lastCompactedAt
+      }
+    });
+
+    return {
+      result,
+      observedCompactedAt
+    };
+  }
+
+  async maybeHandleContextPressure({ phoneKey, remoteJid, project, activeRun }) {
+    const settings = resolveContextMonitorSettings(this.configStore.data);
+    if (!settings.alertsEnabled && !settings.autoCompactEnabled) {
+      return;
+    }
+
+    const { session: latestSession } = this.getProjectSession(phoneKey, project.alias);
+    const tokenUsage = activeRun?.lastTokenUsage ?? latestSession.lastTokenUsage;
+    const tokenUsageAt = activeRun?.lastTokenUsageAt ?? latestSession.lastTokenUsageAt ?? null;
+    const pressure = contextPressureFromTokenUsage(tokenUsage);
+    if (!pressure || !latestSession.threadId) {
+      return;
+    }
+
+    if (
+      tokenUsageAt &&
+      latestSession.lastCompactedAt &&
+      Date.parse(latestSession.lastCompactedAt) > Date.parse(tokenUsageAt)
+    ) {
+      return;
+    }
+
+    const usageKey =
+      tokenUsageAt ??
+      `${pressure.lastTurnTokens}:${pressure.cumulativeTokens}:${pressure.windowTokens}`;
+    const pressureLine = `last_turn_context_usage: ${formatPercent(pressure.lastTurnPercent)} of ${formatCount(pressure.windowTokens)} tokens (${formatCount(pressure.lastTurnTokens)} used in last turn)`;
+
+    if (
+      settings.autoCompactEnabled &&
+      pressure.lastTurnPercent >= settings.autoCompactThresholdPercent
+    ) {
+      if (latestSession.lastAutoCompactTokenUsageAt === usageKey) {
+        return;
+      }
+
+      await this.upsertProjectSession(phoneKey, project.alias, {
+        projectPatch: {
+          lastAutoCompactAt: new Date().toISOString(),
+          lastAutoCompactTokenUsageAt: usageKey,
+          lastAutoCompactPercent: pressure.lastTurnPercent
+        }
+      });
+
+      await this.sendReply(
+        remoteJid,
+        [
+          `Context auto-compact triggered for ${project.alias}.`,
+          pressureLine,
+          `threshold: ${formatPercent(settings.autoCompactThresholdPercent, 0)}`,
+          "Compacting now while the project is idle."
+        ].join("\n")
+      );
+
+      try {
+        const { session: sessionBeforeCompact } = this.getProjectSession(
+          phoneKey,
+          project.alias
+        );
+        const { result, observedCompactedAt } = await this.compactProjectSession({
+          phoneKey,
+          project,
+          projectSession: sessionBeforeCompact
+        });
+        await this.sendReply(
+          remoteJid,
+          [
+            result.observed
+              ? `Auto-compacted ${project.alias} session ${shortThreadId(sessionBeforeCompact.threadId)}.`
+              : `Started auto-compaction for ${project.alias} session ${shortThreadId(sessionBeforeCompact.threadId)}.`,
+            observedCompactedAt ? `last_compacted_at: ${observedCompactedAt}` : null,
+            "Use /ctx to inspect the refreshed context state."
+          ]
+            .filter(Boolean)
+            .join("\n")
+        );
+      } catch (error) {
+        await this.upsertProjectSession(phoneKey, project.alias, {
+          projectPatch: {
+            lastContextAlertAt: new Date().toISOString(),
+            lastContextAlertTokenUsageAt: usageKey,
+            lastContextAlertPercent: pressure.lastTurnPercent
+          }
+        });
+        await this.sendReply(
+          remoteJid,
+          [
+            `Context auto-compact failed for ${project.alias}: ${error.message}`,
+            pressureLine,
+            "You can retry manually with /compact."
+          ].join("\n")
+        );
+      }
+      return;
+    }
+
+    if (
+      settings.alertsEnabled &&
+      pressure.lastTurnPercent >= settings.alertThresholdPercent &&
+      latestSession.lastContextAlertTokenUsageAt !== usageKey
+    ) {
+      await this.upsertProjectSession(phoneKey, project.alias, {
+        projectPatch: {
+          lastContextAlertAt: new Date().toISOString(),
+          lastContextAlertTokenUsageAt: usageKey,
+          lastContextAlertPercent: pressure.lastTurnPercent
+        }
+      });
+
+      await this.sendReply(
+        remoteJid,
+        [
+          `Context alert for ${project.alias}.`,
+          pressureLine,
+          `alert_threshold: ${formatPercent(settings.alertThresholdPercent, 0)}`,
+          settings.autoCompactEnabled
+            ? `auto_compact_threshold: ${formatPercent(settings.autoCompactThresholdPercent, 0)}`
+            : "auto_compact: off",
+          settings.autoCompactEnabled
+            ? "No auto-compact yet because the auto threshold was not reached."
+            : "Use /compact now, or /autocompact on 80 to compact automatically next time."
+        ].join("\n")
+      );
+    }
+  }
+
+  async handleCompactCommand({ phoneKey, remoteJid, payload = "" }) {
+    const config = this.configStore.data;
+    const activeProject = this.getActiveProject(phoneKey);
+    const target = parseProjectTargetPayload(payload, config);
+
+    if (target.targetType === "ambiguous") {
+      await this.sendReply(
+        remoteJid,
+        renderAmbiguousProjectSelectionMessage(payload, target.candidates)
+      );
+      return;
+    }
+
+    if (target.targetType === "unknown") {
+      await this.sendReply(
+        remoteJid,
+        `Unknown project "${String(payload).trim()}". Use /projects to inspect available aliases.`
+      );
+      return;
+    }
+
+    if (target.targetType === "btw") {
+      await this.sendReply(
+        remoteJid,
+        "Compaction is only available for project sessions right now. Use /compact or /compact <project>."
+      );
+      return;
+    }
+
+    const project = resolveConfiguredProject(config, target.projectAlias ?? activeProject.alias);
+    const activeRun = this.projectRun(phoneKey, project.alias);
+    if (activeRun) {
+      await this.sendReply(
+        remoteJid,
+        `Wait for the active Codex run in ${project.alias} to finish or send /stop ${project.alias} before compacting that session.`
+      );
+      return;
+    }
+
+    const { session: projectSession } = this.getProjectSession(phoneKey, project.alias);
+    if (!projectSession.threadId) {
+      await this.sendReply(
+        remoteJid,
+        `Project ${project.alias} does not have a Codex session yet. Send a normal message first, then try /compact again.`
+      );
+      return;
+    }
+
+    try {
+      const { result, observedCompactedAt } = await this.compactProjectSession({
+        phoneKey,
+        project,
+        projectSession
+      });
+      await this.sendReply(
+        remoteJid,
+        [
+          result.observed
+            ? `Compacted ${project.alias} session ${shortThreadId(projectSession.threadId)}.`
+            : `Started compaction for ${project.alias} session ${shortThreadId(projectSession.threadId)}.`,
+          observedCompactedAt ? `last_compacted_at: ${observedCompactedAt}` : null,
+          result.observed
+            ? "Use /ctx to inspect the refreshed context state."
+            : "The compaction completion was not observed yet. Run /ctx in a few seconds to confirm the new state."
+        ]
+          .filter(Boolean)
+          .join("\n")
+      );
+    } catch (error) {
+      await this.sendReply(
+        remoteJid,
+        `Failed to compact project ${project.alias}: ${error.message}`
+      );
+    }
   }
 
   async sendThreadList(phoneKey, remoteJid, payload = "") {
@@ -3422,6 +4199,9 @@ export class WhatsAppControllerBridge {
       lastProgressAt: null,
       progressPhase: null,
       progressPreview: null,
+      lastTokenUsage: normalizeThreadTokenUsage(projectSession.lastTokenUsage),
+      lastTokenUsageAt: projectSession.lastTokenUsageAt ?? null,
+      lastCompactedAt: projectSession.lastCompactedAt ?? null,
       voiceReply: cloneVoiceReplySetting(activeVoiceReply),
       scopeType,
       projectAlias: scopeType === "project" ? project.alias : null
@@ -3495,7 +4275,10 @@ export class WhatsAppControllerBridge {
             pendingApproval: null,
             lastReplyAt: new Date().toISOString(),
             lastReplyPreview: replyText.slice(0, 200),
-            lastReplyVoiceReply: currentVoiceReply.enabled ? currentVoiceReply : null
+            lastReplyVoiceReply: currentVoiceReply.enabled ? currentVoiceReply : null,
+            lastTokenUsage: activeRun.lastTokenUsage ?? projectSession.lastTokenUsage ?? null,
+            lastTokenUsageAt: activeRun.lastTokenUsageAt ?? projectSession.lastTokenUsageAt ?? null,
+            lastCompactedAt: activeRun.lastCompactedAt ?? projectSession.lastCompactedAt ?? null
           }
         });
       } else {
@@ -3511,50 +4294,42 @@ export class WhatsAppControllerBridge {
         });
       }
 
-      if (currentVoiceReply.enabled) {
-        try {
-          const activeProjectNow = this.getActiveProject(phoneKey);
-          if (scopeType === "project" && activeProjectNow.alias !== project.alias) {
-            await this.sendReply(
-              remoteJid,
+      const fullReplyText =
+        scopeType === "btw"
+          ? replyText
+          : joinMessageSections(
               formatProjectRunReplyPrefix({
                 projectAlias: project.alias,
                 threadId: result.threadId,
-                activeProjectAlias: activeProjectNow.alias
-              })
+                activeProjectAlias: this.getActiveProject(phoneKey).alias
+              }),
+              replyText
             );
-          }
+
+      if (currentVoiceReply.enabled) {
+        const ttsProvider = resolveConfiguredTtsProvider(this.configStore.data);
+        await this.sendReply(remoteJid, fullReplyText);
+        try {
           await this.sendVoiceReply(
             remoteJid,
             replyText,
             currentVoiceReply,
-            replyEnvelope.languageId
+            replyEnvelope.languageId,
+            ttsProvider
           );
-          const textCompanion = buildVoiceReplyTextCompanion(replyText);
-          if (textCompanion) {
-            await this.sendReply(
-              remoteJid,
-              `Text companion:\n${textCompanion}`
-            );
-          }
         } catch (error) {
           await this.sendReply(
             remoteJid,
-            `Failed to generate the voice reply locally with ${DEFAULT_TTS_PROVIDER}: ${error.message}`
+            `Failed to generate the voice reply locally with ${ttsProvider}: ${error.message}`
           );
-          await this.sendReply(
+        }
+        if (scopeType === "project") {
+          await this.maybeHandleContextPressure({
+            phoneKey,
             remoteJid,
-            scopeType === "btw"
-              ? replyText
-              : joinMessageSections(
-                  formatProjectRunReplyPrefix({
-                    projectAlias: project.alias,
-                    threadId: result.threadId,
-                    activeProjectAlias: this.getActiveProject(phoneKey).alias
-                  }),
-                  replyText
-                )
-          );
+            project,
+            activeRun
+          });
         }
         await this.runNextQueuedPrompt({
           phoneKey,
@@ -3566,19 +4341,15 @@ export class WhatsAppControllerBridge {
         return;
       }
 
-      await this.sendReply(
-        remoteJid,
-        scopeType === "btw"
-          ? replyText
-          : joinMessageSections(
-              formatProjectRunReplyPrefix({
-                projectAlias: project.alias,
-                threadId: result.threadId,
-                activeProjectAlias: this.getActiveProject(phoneKey).alias
-              }),
-              replyText
-            )
-      );
+      await this.sendReply(remoteJid, fullReplyText);
+      if (scopeType === "project") {
+        await this.maybeHandleContextPressure({
+          phoneKey,
+          remoteJid,
+          project,
+          activeRun
+        });
+      }
       await this.runNextQueuedPrompt({
         phoneKey,
         remoteJid,
@@ -3602,7 +4373,10 @@ export class WhatsAppControllerBridge {
           projectPatch: {
             pendingApproval: null,
             lastErrorAt: new Date().toISOString(),
-            lastError: error.message
+            lastError: error.message,
+            lastTokenUsage: activeRun.lastTokenUsage ?? projectSession.lastTokenUsage ?? null,
+            lastTokenUsageAt: activeRun.lastTokenUsageAt ?? projectSession.lastTokenUsageAt ?? null,
+            lastCompactedAt: activeRun.lastCompactedAt ?? projectSession.lastCompactedAt ?? null
           }
         });
       }
@@ -3635,11 +4409,12 @@ export class WhatsAppControllerBridge {
     await this.sendTextMessage(remoteJid, sanitizeReplyTextForWhatsApp(text));
   }
 
-  async sendVoiceReply(remoteJid, text, voiceReply, languageIdHint = null) {
+  async sendVoiceReply(remoteJid, text, voiceReply, languageIdHint = null, provider = null) {
     const synthesized = await synthesizeVoiceReply({
       text,
       speed: voiceReply?.speed,
-      languageIdHint
+      languageIdHint,
+      provider: provider ?? resolveConfiguredTtsProvider(this.configStore.data)
     });
     await this.sendVoiceNoteMessage(remoteJid, synthesized.audioBuffer, {
       mimetype: synthesized.mimetype,

@@ -8,7 +8,7 @@ import { pluginRoot } from "./paths.mjs";
 export const DEFAULT_VOICE_REPLY_SPEED = "1x";
 export const DEFAULT_TTS_PROVIDER = normalizeTtsProvider(
   process.env.WHATSAPP_RELAY_TTS_PROVIDER,
-  "chatterbox-turbo"
+  process.platform === "win32" ? "system" : "chatterbox-turbo"
 );
 
 const MAX_SPOKEN_REPLY_CHARS = resolvePositiveInt(
@@ -24,10 +24,20 @@ const DEFAULT_CHATTERBOX_DEVICE = normalizeChatterboxDevice(
   process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_DEVICE,
   "auto"
 );
+const DEFAULT_KOKORO_ROOT = path.join(pluginRoot, "tools", "kokoro-onnx");
+const DEFAULT_KOKORO_PYTHON = path.join(
+  DEFAULT_KOKORO_ROOT,
+  ".venv",
+  process.platform === "win32" ? "Scripts" : "bin",
+  process.platform === "win32" ? "python.exe" : "python"
+);
+const DEFAULT_KOKORO_MODEL_FILE = path.join(DEFAULT_KOKORO_ROOT, "kokoro-v1.0.onnx");
+const DEFAULT_KOKORO_VOICES_FILE = path.join(DEFAULT_KOKORO_ROOT, "voices-v1.0.bin");
 const CHATTERBOX_AUDIO_PROMPT = String(
   process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_AUDIO_PROMPT ?? ""
 ).trim();
 const CHATTERBOX_TTS_SCRIPT = path.join(pluginRoot, "scripts", "chatterbox_tts.py");
+const KOKORO_TTS_SCRIPT = path.join(pluginRoot, "scripts", "kokoro_tts.py");
 const CHATTERBOX_FRANC_LANGUAGE_IDS = new Map([
   ["ara", "ar"],
   ["arb", "ar"],
@@ -66,8 +76,22 @@ const CHATTERBOX_LANGUAGE_ALIASES = new Map([
   ["nb", "no"],
   ["nn", "no"]
 ]);
+const KOKORO_LANGUAGE_CONFIGS = new Map([
+  ["en", { lang: "en-us", voice: "af_sarah" }],
+  ["es", { lang: "es", voice: "ef_dora" }],
+  ["fr", { lang: "fr-fr", voice: "ff_siwis" }],
+  ["hi", { lang: "hi", voice: "hf_alpha" }],
+  ["it", { lang: "it", voice: "if_sara" }],
+  ["ja", { lang: "ja", voice: "jf_alpha" }],
+  ["pt", { lang: "pt-br", voice: "pf_dora" }],
+  ["zh", { lang: "zh", voice: "zf_xiaobei" }]
+]);
 
 let voiceCachePromise = null;
+
+function powershellBin() {
+  return process.env.WHATSAPP_RELAY_TTS_POWERSHELL_BIN ?? "powershell.exe";
+}
 
 function resolvePositiveInt(value, fallback) {
   const parsed = Number.parseInt(String(value ?? ""), 10);
@@ -95,7 +119,14 @@ export function normalizeTtsProvider(value, fallback = DEFAULT_TTS_PROVIDER) {
     case "system":
     case "say":
     case "macos":
+    case "sapi":
+    case "windows":
+    case "windows-sapi":
+    case "win32":
       return "system";
+    case "kokoro":
+    case "kokoro-onnx":
+      return "kokoro";
     case "chatterbox":
     case "chatterbox-turbo":
     case "turbo":
@@ -126,6 +157,10 @@ function normalizeChatterboxDevice(value, fallback = "auto") {
 
 export function resolveEffectiveTtsProvider(provider, languageId) {
   const normalizedProvider = normalizeTtsProvider(provider, DEFAULT_TTS_PROVIDER);
+  if (normalizedProvider === "kokoro") {
+    return "kokoro";
+  }
+
   if (normalizedProvider === "chatterbox-turbo" && !languageId) {
     return "system";
   }
@@ -261,34 +296,82 @@ export function detectSpeechLanguageId(text) {
 
 async function listSystemVoices() {
   if (!voiceCachePromise) {
-    voiceCachePromise = runCommand("say", ["-v", "?"], {
-      timeoutMs: DEFAULT_TIMEOUT_MS
-    })
-      .then(({ stdout }) =>
-        stdout
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .filter(Boolean)
-          .map((line) => {
-            const match = line.match(/^(.+?)\s+([a-z]{2}_[A-Z]{2})\s+#/);
-            if (!match) {
-              return null;
-            }
-            return {
-              name: match[1].trim(),
-              locale: match[2]
-            };
-          })
-          .filter(Boolean)
-      )
-      .catch(() => []);
+    voiceCachePromise =
+      process.platform === "win32" ? listWindowsSystemVoices() : listMacSystemVoices();
   }
 
   return voiceCachePromise;
 }
 
+async function listMacSystemVoices() {
+  return runCommand("say", ["-v", "?"], {
+    timeoutMs: DEFAULT_TIMEOUT_MS
+  })
+    .then(({ stdout }) =>
+      stdout
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => {
+          const match = line.match(/^(.+?)\s+([a-z]{2}_[A-Z]{2})\s+#/);
+          if (!match) {
+            return null;
+          }
+          return {
+            name: match[1].trim(),
+            locale: match[2]
+          };
+        })
+        .filter(Boolean)
+    )
+    .catch(() => []);
+}
+
+async function listWindowsSystemVoices() {
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "Add-Type -AssemblyName System.Speech",
+    "$synth = [System.Speech.Synthesis.SpeechSynthesizer]::new()",
+    "try {",
+    "  $voices = $synth.GetInstalledVoices() | ForEach-Object {",
+    "    [PSCustomObject]@{ Name = $_.VoiceInfo.Name; Culture = $_.VoiceInfo.Culture.Name }",
+    "  }",
+    "  $voices | ConvertTo-Json -Compress",
+    "} finally {",
+    "  $synth.Dispose()",
+    "}"
+  ].join("; ");
+
+  return runCommand(
+    powershellBin(),
+    ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+    { timeoutMs: DEFAULT_TIMEOUT_MS }
+  )
+    .then(({ stdout }) => {
+      const parsed = JSON.parse(stdout.trim() || "[]");
+      const voices = Array.isArray(parsed) ? parsed : [parsed];
+      return voices
+        .map((voice) => ({
+          name: String(voice.Name ?? "").trim(),
+          locale: String(voice.Culture ?? "").trim().replace(/-/g, "_")
+        }))
+        .filter((voice) => voice.name);
+    })
+    .catch(() => []);
+}
+
 function preferredVoiceNamesForLocale(locale) {
   switch (locale) {
+    case "fr":
+      return [
+        process.env.WHATSAPP_RELAY_TTS_VOICE_FR,
+        "Microsoft Hortense Desktop",
+        "Microsoft Paul Desktop",
+        "Microsoft Julie Desktop",
+        "Hortense",
+        "Paul",
+        "Julie"
+      ].filter(Boolean);
     case "es":
       return [
         process.env.WHATSAPP_RELAY_TTS_VOICE_ES,
@@ -340,11 +423,13 @@ async function resolveVoiceName(locale) {
       ? ["es_MX", "es_ES"]
       : locale === "en"
         ? ["en_US", "en_GB"]
-        : locale === "pt"
-          ? ["pt_BR", "pt_PT"]
-          : locale === "it"
-            ? ["it_IT"]
-            : [];
+        : locale === "fr"
+          ? ["fr_FR", "fr_CA"]
+          : locale === "pt"
+            ? ["pt_BR", "pt_PT"]
+            : locale === "it"
+              ? ["it_IT"]
+              : [];
   for (const exactLocale of exactLocales) {
     const exactVoice = voices.find((voice) => voice.locale === exactLocale);
     if (exactVoice) {
@@ -560,6 +645,71 @@ function buildChatterboxArgs({ textFile, outputFile, device, audioPromptPath, la
   return args;
 }
 
+function resolveKokoroPython() {
+  const explicit = String(process.env.WHATSAPP_RELAY_TTS_KOKORO_PYTHON ?? "").trim();
+  return explicit || DEFAULT_KOKORO_PYTHON;
+}
+
+function resolveKokoroModelFile() {
+  const explicit = String(process.env.WHATSAPP_RELAY_TTS_KOKORO_MODEL ?? "").trim();
+  return explicit || DEFAULT_KOKORO_MODEL_FILE;
+}
+
+function resolveKokoroVoicesFile() {
+  const explicit = String(process.env.WHATSAPP_RELAY_TTS_KOKORO_VOICES ?? "").trim();
+  return explicit || DEFAULT_KOKORO_VOICES_FILE;
+}
+
+function normalizeKokoroLanguageId(value) {
+  const normalized = normalizeSpeechLanguageId(value);
+  if (normalized && KOKORO_LANGUAGE_CONFIGS.has(normalized)) {
+    return normalized;
+  }
+
+  const fallback = normalizeSpeechLanguageId(
+    process.env.WHATSAPP_RELAY_TTS_KOKORO_DEFAULT_LANGUAGE ?? "fr"
+  );
+  return fallback && KOKORO_LANGUAGE_CONFIGS.has(fallback) ? fallback : "fr";
+}
+
+export function resolveKokoroLanguageConfig(languageId) {
+  const normalized = normalizeKokoroLanguageId(languageId);
+  const config = KOKORO_LANGUAGE_CONFIGS.get(normalized) ?? KOKORO_LANGUAGE_CONFIGS.get("fr");
+  const explicitVoice = String(process.env.WHATSAPP_RELAY_TTS_KOKORO_VOICE ?? "").trim();
+  return {
+    languageId: normalized,
+    lang: config.lang,
+    voice: explicitVoice || config.voice
+  };
+}
+
+function buildKokoroArgs({
+  textFile,
+  outputFile,
+  modelFile,
+  voicesFile,
+  voice,
+  lang
+}) {
+  return [
+    KOKORO_TTS_SCRIPT,
+    "--text-file",
+    textFile,
+    "--output-file",
+    outputFile,
+    "--model-file",
+    modelFile,
+    "--voices-file",
+    voicesFile,
+    "--voice",
+    voice,
+    "--lang",
+    lang,
+    "--speed",
+    "1.0"
+  ];
+}
+
 function parseStructuredStdout(stdout) {
   const lines = String(stdout ?? "")
     .split(/\r?\n/)
@@ -578,6 +728,18 @@ function parseStructuredStdout(stdout) {
 }
 
 async function synthesizeWithSystemVoice({ spokenText, speed, timeoutMs, locale }) {
+  if (process.platform === "win32") {
+    return synthesizeWithWindowsSapi({ spokenText, speed, timeoutMs, locale });
+  }
+
+  if (process.platform !== "darwin") {
+    throw new Error("System TTS is only wired for Windows SAPI and macOS say.");
+  }
+
+  return synthesizeWithMacSay({ spokenText, speed, timeoutMs, locale });
+}
+
+async function synthesizeWithMacSay({ spokenText, speed, timeoutMs, locale }) {
   const voice = await resolveVoiceName(locale);
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "whatsapp-relay-tts-"));
 
@@ -609,6 +771,72 @@ async function synthesizeWithSystemVoice({ spokenText, speed, timeoutMs, locale 
       seconds,
       mimetype: "audio/ogg; codecs=opus",
       provider: "system"
+    };
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+async function synthesizeWithWindowsSapi({ spokenText, speed, timeoutMs, locale }) {
+  const voice = await resolveVoiceName(locale);
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "whatsapp-relay-sapi-"));
+
+  try {
+    const textFile = path.join(tempDir, "reply.txt");
+    const rawAudioFile = path.join(tempDir, "reply.wav");
+    const outputFile = path.join(tempDir, "reply.ogg");
+    const scriptFile = path.join(tempDir, "sapi-tts.ps1");
+
+    await fs.writeFile(textFile, spokenText, "utf8");
+
+    const script = [
+      "param([string]$TextFile, [string]$OutputFile, [string]$VoiceName)",
+      "$ErrorActionPreference = 'Stop'",
+      "Add-Type -AssemblyName System.Speech",
+      "$synth = [System.Speech.Synthesis.SpeechSynthesizer]::new()",
+      "try {",
+      "  if ($VoiceName) { $synth.SelectVoice($VoiceName) }",
+      "  $synth.SetOutputToWaveFile($OutputFile)",
+      "  $text = [System.IO.File]::ReadAllText($TextFile, [System.Text.Encoding]::UTF8)",
+      "  $synth.Speak($text)",
+      "} finally {",
+      "  $synth.Dispose()",
+      "}"
+    ].join("\n");
+
+    await fs.writeFile(scriptFile, script, "utf8");
+
+    await runCommand(
+      powershellBin(),
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        scriptFile,
+        textFile,
+        rawAudioFile,
+        voice ?? ""
+      ],
+      { timeoutMs }
+    );
+
+    await runCommand("ffmpeg", ffmpegArgs({ inputFile: rawAudioFile, outputFile, speed }), {
+      timeoutMs
+    });
+
+    const [audioBuffer, seconds] = await Promise.all([
+      fs.readFile(outputFile),
+      probeDurationSeconds(outputFile)
+    ]);
+
+    return {
+      audioBuffer,
+      voice,
+      seconds,
+      mimetype: "audio/ogg; codecs=opus",
+      provider: "windows-sapi"
     };
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true });
@@ -681,6 +909,71 @@ async function synthesizeWithChatterbox({ spokenText, speed, timeoutMs, locale, 
   }
 }
 
+async function synthesizeWithKokoro({ spokenText, speed, timeoutMs, languageId }) {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "whatsapp-relay-kokoro-"));
+  const pythonBin = resolveKokoroPython();
+  const modelFile = resolveKokoroModelFile();
+  const voicesFile = resolveKokoroVoicesFile();
+  const languageConfig = resolveKokoroLanguageConfig(languageId);
+
+  try {
+    await ensureFileExists(
+      pythonBin,
+      "Install Kokoro locally or set WHATSAPP_RELAY_TTS_KOKORO_PYTHON."
+    );
+    await ensureFileExists(
+      modelFile,
+      "Download kokoro-v1.0.onnx or set WHATSAPP_RELAY_TTS_KOKORO_MODEL."
+    );
+    await ensureFileExists(
+      voicesFile,
+      "Download voices-v1.0.bin or set WHATSAPP_RELAY_TTS_KOKORO_VOICES."
+    );
+    await ensureFileExists(KOKORO_TTS_SCRIPT, "The Kokoro bridge script is missing.");
+
+    const textFile = path.join(tempDir, "reply.txt");
+    const rawAudioFile = path.join(tempDir, "reply.wav");
+    const outputFile = path.join(tempDir, "reply.ogg");
+    await fs.writeFile(textFile, spokenText, "utf8");
+
+    const { stdout } = await runCommand(
+      pythonBin,
+      buildKokoroArgs({
+        textFile,
+        outputFile: rawAudioFile,
+        modelFile,
+        voicesFile,
+        voice: languageConfig.voice,
+        lang: languageConfig.lang
+      }),
+      { timeoutMs }
+    );
+
+    await runCommand("ffmpeg", ffmpegArgs({ inputFile: rawAudioFile, outputFile, speed }), {
+      timeoutMs
+    });
+
+    const metadata = parseStructuredStdout(stdout);
+    const [audioBuffer, seconds] = await Promise.all([
+      fs.readFile(outputFile),
+      probeDurationSeconds(outputFile)
+    ]);
+
+    return {
+      audioBuffer,
+      seconds,
+      locale: languageConfig.languageId,
+      languageId: languageConfig.languageId,
+      voice: metadata.voice ?? languageConfig.voice,
+      lang: metadata.lang ?? languageConfig.lang,
+      mimetype: "audio/ogg; codecs=opus",
+      provider: "kokoro-onnx"
+    };
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+}
+
 export async function synthesizeVoiceReply({
   text,
   speed = DEFAULT_VOICE_REPLY_SPEED,
@@ -710,6 +1003,21 @@ export async function synthesizeVoiceReply({
       ...synthesized,
       spokenText,
       locale,
+      speed: normalizeVoiceReplySpeed(speed)
+    };
+  }
+
+  if (normalizedProvider === "kokoro") {
+    const synthesized = await synthesizeWithKokoro({
+      spokenText,
+      speed,
+      timeoutMs,
+      languageId
+    });
+    return {
+      ...synthesized,
+      spokenText,
+      locale: synthesized.locale,
       speed: normalizeVoiceReplySpeed(speed)
     };
   }

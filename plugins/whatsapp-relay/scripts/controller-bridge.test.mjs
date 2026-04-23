@@ -15,6 +15,7 @@ import {
   WhatsAppControllerBridge,
   parseImplicitProjectCommand,
   parseApprovalTargetPayload,
+  parseContextMonitorCommandPayload,
   parseVoiceReplyCommandPayload,
   normalizeVoiceCommandText,
   parseIncomingCommand,
@@ -40,6 +41,22 @@ test("parseIncomingCommand accepts shortcut aliases for admin commands", () => {
   assert.deepEqual(parseIncomingCommand("/project alpha-app", true), {
     type: "project",
     payload: "alpha-app"
+  });
+  assert.deepEqual(parseIncomingCommand("/ctx", true), {
+    type: "context",
+    payload: ""
+  });
+  assert.deepEqual(parseIncomingCommand("/context alpha-app", true), {
+    type: "context",
+    payload: "alpha-app"
+  });
+  assert.deepEqual(parseIncomingCommand("/compact alpha-app", true), {
+    type: "compact",
+    payload: "alpha-app"
+  });
+  assert.deepEqual(parseIncomingCommand("/autocompact on 80", true), {
+    type: "contextMonitor",
+    payload: "on 80"
   });
   assert.deepEqual(parseIncomingCommand("/project 2", true), {
     type: "project",
@@ -116,6 +133,63 @@ test("parseIncomingCommand recognizes the natural-language new project session s
       target: "alpha app inside code directory"
     }
   );
+});
+
+test("handleIncomingMessage ignores WhatsApp protocol messages", async () => {
+  const bridge = new WhatsAppControllerBridge({
+    runtime: {},
+    configStore: {
+      data: {
+        enabled: true,
+        defaultProject: "alpha-app",
+        permissionLevel: "workspace-write",
+        captureAllDirectMessages: true
+      },
+      async load() {
+        return this.data;
+      },
+      async findControllerByJid() {
+        return {
+          phoneKey: "1234567890",
+          label: "self"
+        };
+      }
+    },
+    stateStore: {
+      data: {
+        process: {}
+      },
+      getSession() {
+        return null;
+      }
+    }
+  });
+
+  let replied = false;
+  let ranPrompt = false;
+  bridge.sendReply = async () => {
+    replied = true;
+  };
+  bridge.runPrompt = async () => {
+    ranPrompt = true;
+  };
+
+  await bridge.handleIncomingMessage({
+    key: {
+      remoteJid: "1234567890@s.whatsapp.net",
+      id: "msg-1",
+      fromMe: false
+    },
+    messageTimestamp: Math.floor(Date.now() / 1000),
+    message: {
+      protocolMessage: {
+        type: 0
+      }
+    }
+  });
+
+  assert.equal(replied, false);
+  assert.equal(ranPrompt, false);
 });
 
 test("parseApprovalTargetPayload keeps multi-word project targets intact", () => {
@@ -282,6 +356,45 @@ test("applyRunLifecycleEvent tracks live progress and approvals for an active ru
   );
   assert.equal(activeRun.status, "waiting_for_approval");
   assert.equal(activeRun.lastEventAt, "2026-03-30T10:00:03.000Z");
+
+  applyRunLifecycleEvent(
+    activeRun,
+    {
+      type: "tokenUsageUpdated",
+      threadId: "thread-backend",
+      tokenUsage: {
+        total: {
+          totalTokens: 120,
+          inputTokens: 90,
+          cachedInputTokens: 10,
+          outputTokens: 30,
+          reasoningOutputTokens: 12
+        },
+        last: {
+          totalTokens: 20,
+          inputTokens: 12,
+          cachedInputTokens: 1,
+          outputTokens: 8,
+          reasoningOutputTokens: 4
+        },
+        modelContextWindow: 1050000
+      }
+    },
+    "2026-03-30T10:00:04.000Z"
+  );
+  assert.equal(activeRun.lastTokenUsage.total.totalTokens, 120);
+  assert.equal(activeRun.lastTokenUsageAt, "2026-03-30T10:00:04.000Z");
+
+  applyRunLifecycleEvent(
+    activeRun,
+    {
+      type: "contextCompactionCompleted",
+      threadId: "thread-backend",
+      compactedAt: "2026-03-30T10:00:05.000Z"
+    },
+    "2026-03-30T10:00:05.000Z"
+  );
+  assert.equal(activeRun.lastCompactedAt, "2026-03-30T10:00:05.000Z");
 });
 
 test("WhatsAppControllerBridge summary reports the active project's thread id", () => {
@@ -374,6 +487,66 @@ test("renderSessionStatus includes live run status and preview for active projec
   assert.match(status, /run_status: finalizing/);
   assert.match(status, /run_preview: Preparing the final answer/);
   assert.match(status, /run_progress_at: 2026-03-30T10:00:04.000Z/);
+});
+
+test("renderSessionStatus includes latest observed context usage and compaction info", () => {
+  const bridge = new WhatsAppControllerBridge({
+    runtime: {},
+    configStore: {
+      data: {
+        defaultProject: "alpha-app",
+        permissionLevel: "workspace-write"
+      }
+    },
+    stateStore: {
+      data: {
+        process: {}
+      },
+      getSession() {
+        return {
+          phoneKey: "123",
+          activeProject: "alpha-app",
+          projects: {
+            "alpha-app": {
+              threadId: "thread-backend",
+              permissionLevel: "workspace-write",
+              lastTokenUsage: {
+                total: {
+                  totalTokens: 123456,
+                  inputTokens: 100000,
+                  cachedInputTokens: 5000,
+                  outputTokens: 23456,
+                  reasoningOutputTokens: 12000
+                },
+                last: {
+                  totalTokens: 2345,
+                  inputTokens: 1200,
+                  cachedInputTokens: 100,
+                  outputTokens: 1145,
+                  reasoningOutputTokens: 600
+                },
+                modelContextWindow: 1050000
+              },
+              lastTokenUsageAt: "2026-04-22T19:00:00.000Z",
+              lastCompactedAt: "2026-04-22T19:05:00.000Z"
+            }
+          }
+        };
+      }
+    }
+  });
+
+  const status = bridge.renderSessionStatus("123");
+  assert.match(
+    status,
+    /last_turn_context_usage: 0\.2% of 1,050,000 tokens \(2,345 used in last turn\)/
+  );
+  assert.match(
+    status,
+    /cumulative_context_tokens: 123,456 observed historically \(11\.8% of the window cumulatively, not live usage\)/
+  );
+  assert.match(status, /context_usage_observed_at: 2026-04-22T19:00:00.000Z/);
+  assert.match(status, /last_compacted_at: 2026-04-22T19:05:00.000Z/);
 });
 
 test("renderSessionStatus includes queued message counts for project and btw scopes", () => {
@@ -616,6 +789,22 @@ test("parseVoiceReplyCommandPayload parses status and speed controls", () => {
   assert.deepEqual(parseVoiceReplyCommandPayload("off"), { action: "off" });
 });
 
+test("parseContextMonitorCommandPayload parses alert and auto-compact controls", () => {
+  assert.deepEqual(parseContextMonitorCommandPayload(""), { action: "status" });
+  assert.deepEqual(parseContextMonitorCommandPayload("on 80"), {
+    action: "autoOn",
+    thresholdPercent: 80
+  });
+  assert.deepEqual(parseContextMonitorCommandPayload("off"), { action: "autoOff" });
+  assert.deepEqual(parseContextMonitorCommandPayload("alert on 75"), {
+    action: "alertOn",
+    thresholdPercent: 75
+  });
+  assert.deepEqual(parseContextMonitorCommandPayload("alert off"), {
+    action: "alertOff"
+  });
+});
+
 test("resolveRunVoiceReply prefers the latest active-run voice setting", () => {
   assert.deepEqual(
     resolveRunVoiceReply(
@@ -739,7 +928,7 @@ test("extractOneShotVoiceReplyRequest accepts transcribed speed variants like on
 test("buildVoiceReplyPrompt instructs Codex to emit a hidden reply language tag", () => {
   const prompt = buildVoiceReplyPrompt("Explain the change.");
   assert.match(prompt, /\[\[reply_language:<language-code>\]\]/);
-  assert.match(prompt, /for example en, es, it, or pt-BR/i);
+  assert.match(prompt, /for example fr, en, es, it, or pt-BR/i);
   assert.match(prompt, /do not mention the metadata/i);
 });
 

@@ -50,9 +50,34 @@ test("ControllerConfigStore normalizes boolean-like non-English overrides from d
   }
 });
 
+test("ControllerConfigStore accepts Kokoro as a local voice provider", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "controller-config-test-"));
+  const filePath = path.join(tempDir, "controller-config.json");
+
+  try {
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({
+        enabled: true,
+        ttsProvider: "kokoro-onnx",
+        allowedControllers: []
+      }),
+      "utf8"
+    );
+
+    const store = new ControllerConfigStore(filePath);
+    const config = await store.load();
+
+    assert.equal(config.ttsProvider, "kokoro");
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("ControllerConfigStore migrates a legacy single-workspace config into projects", async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "controller-config-test-"));
   const filePath = path.join(tempDir, "controller-config.json");
+  const workspace = path.resolve("/tmp/alpha-app");
 
   try {
     await fs.writeFile(
@@ -70,10 +95,10 @@ test("ControllerConfigStore migrates a legacy single-workspace config into proje
     const config = await store.load();
 
     assert.equal(config.defaultProject, "main");
-    assert.equal(config.workspace, "/tmp/alpha-app");
+    assert.equal(config.workspace, workspace);
     assert.equal(config.projects.length, 1);
     assert.equal(config.projects[0].alias, "main");
-    assert.equal(config.projects[0].workspace, "/tmp/alpha-app");
+    assert.equal(config.projects[0].workspace, workspace);
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true });
   }

@@ -1,5 +1,6 @@
 node_modules/
 plugins/whatsapp-relay/.venv-chatterbox/
+plugins/whatsapp-relay/tools/
 
 plugins/whatsapp-relay/data/auth*/
 plugins/whatsapp-relay/data/controller-config.json
@@ -9,6 +10,7 @@ plugins/whatsapp-relay/data/controller-outbox/
 plugins/whatsapp-relay/data/controller-outbox.failed/
 plugins/whatsapp-relay/data/store.json
 plugins/whatsapp-relay/data/runtime.json
+controller-owner.json
 
 npm-debug.log*
 .worktrees
