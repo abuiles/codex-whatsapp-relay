@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Windows voice-note transcription support through a local `whisper.cpp` provider.
+- Optional Kokoro ONNX outbound voice-reply provider for local neural TTS.
+- Context monitoring commands, including `/ctx`, `/compact`, and `/autocompact`.
+
+### Changed
+
+- Outbound voice replies now keep the text reply visible and send the voice note as an additional companion.
+- `/ctx` now reports last-turn context usage relative to the model window, while cumulative historical token totals are labeled separately.
+- Voice-note status messages now include the active transcription provider and model.
+
+### Fixed
+
+- Windows `.cmd` and `.bat` Codex shims are spawned through a shell so local controller runs work with npm-installed Codex binaries.
+- `npm run check` and `npm test` now use portable Node scripts instead of shell globs.
+
+### Security
+
+- Local controller ownership state is ignored so runtime metadata cannot be staged accidentally.
+
 ## [0.4.3] - 2026-03-30
 
 ### Fixed

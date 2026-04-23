@@ -36,6 +36,9 @@ Use this skill when the user wants to connect WhatsApp, inspect recent chats, re
    - send `/sessions` or `/ls` to list recent Codex threads
    - send `/1`, `/2`, ... or `/session <number|thread-id-prefix>` or `/c <number|thread-id-prefix>` to switch this chat to another Codex session
    - send `/status` or `/st` to inspect the active session
+   - send `/context` or `/ctx` to inspect the latest observed context usage for a project session
+   - send `/compact` to compact a project thread
+   - send `/autocompact` to inspect or change context alerts and idle auto-compaction
    - send `/permissions` or `/p` to inspect the current permission level
    - send `/voice` to inspect or change outbound voice-reply mode for that chat
    - send `/permissions ro|ww|dfa` or `/permissions read-only|workspace-write|danger-full-access` to change the session sandbox level
@@ -46,15 +49,16 @@ Use this skill when the user wants to connect WhatsApp, inspect recent chats, re
    The bridge uses `codex app-server` under the hood so each allowed number maps to a native Codex thread that can be resumed across messages.
    `workspace-write` is the safe default because guarded command and file-change approvals can be answered from WhatsApp.
    `danger-full-access` requires an explicit confirmation code from the chat before the bridge disables sandboxing for that session.
-   Voice notes are transcribed locally with Parakeet v3 via `uvx` and `ffmpeg`, and short low-confidence transcripts are rejected so the chat can retry instead of sending a bad prompt to Codex.
-   Outbound voice replies are synthesized locally through Chatterbox by default. English uses Turbo, and supported non-English replies route through Chatterbox Multilingual. macOS `say` remains available as an explicit fallback.
+   Voice notes are transcribed locally with Parakeet v3 via `uvx` and `ffmpeg` by default on macOS/Linux, or with `whisper.cpp` by default on Windows. Short low-confidence transcripts are rejected when confidence metadata is available so the chat can retry instead of sending a bad prompt to Codex.
+   Outbound voice replies send the text reply first, then an optional local WhatsApp voice note. Chatterbox remains available, Windows SAPI and macOS `say` are system fallbacks, and Kokoro ONNX can be configured as a local neural TTS provider.
    While the bridge is running, treat it as the sole owner of the live WhatsApp session. Prefer cached reads from MCP tools and route outbound messages through the bridge instead of reconnecting a second socket.
    If the allowed controller is the same WhatsApp account linked to the plugin, the self chat can be used as the control surface and should be treated as a valid source of prompts.
 
 ## Local state
 
- - Auth credentials: `plugins/whatsapp-relay/data/auth*`
+- Auth credentials: `plugins/whatsapp-relay/data/auth*`
 - Chat cache: `plugins/whatsapp-relay/data/store.json`
+- Controller config/state/logs and downloaded local models live under `plugins/whatsapp-relay/data/` and `plugins/whatsapp-relay/tools/`; treat them as local runtime state and keep them out of git.
 
 ## Rules
 
