@@ -3331,14 +3331,6 @@ export class WhatsAppControllerBridge {
         return;
       }
 
-      await this.upsertProjectSession(phoneKey, project.alias, {
-        projectPatch: {
-          lastAutoCompactAt: new Date().toISOString(),
-          lastAutoCompactTokenUsageAt: usageKey,
-          lastAutoCompactPercent: pressure.lastTurnPercent
-        }
-      });
-
       await this.sendReply(
         remoteJid,
         [
@@ -3358,6 +3350,13 @@ export class WhatsAppControllerBridge {
           phoneKey,
           project,
           projectSession: sessionBeforeCompact
+        });
+        await this.upsertProjectSession(phoneKey, project.alias, {
+          projectPatch: {
+            lastAutoCompactAt: new Date().toISOString(),
+            lastAutoCompactTokenUsageAt: usageKey,
+            lastAutoCompactPercent: pressure.lastTurnPercent
+          }
         });
         await this.sendReply(
           remoteJid,

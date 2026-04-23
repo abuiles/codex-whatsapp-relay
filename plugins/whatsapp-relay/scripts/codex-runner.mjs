@@ -949,13 +949,14 @@ export async function compactCodexThread({
   model = null,
   profile = null,
   search = false,
-  timeoutMs = 8_000,
-  pollMs = 400
+  timeoutMs = 90_000,
+  pollMs = 1_000
 }) {
   if (!String(threadId ?? "").trim()) {
     throw new Error("Codex thread id cannot be empty.");
   }
 
+  let resolvedThreadId = threadId;
   let observedCompactionAt = null;
   const client = startAppServerClient({
     codexBin,
@@ -967,7 +968,7 @@ export async function compactCodexThread({
     onNotification(message) {
       const normalized = normalizeCodexTurnNotification(message, {
         activeTurnId: null,
-        resolvedThreadId: threadId
+        resolvedThreadId
       });
       if (normalized?.type === "contextCompactionCompleted") {
         observedCompactionAt = normalized.compactedAt ?? new Date().toISOString();
@@ -984,15 +985,28 @@ export async function compactCodexThread({
       }
     });
 
+    const permissionParams = appServerPermissionParams("read-only");
+    const resumeResult = await client.request("thread/resume", {
+      threadId,
+      cwd: workspace,
+      ...(model ? { model } : {}),
+      approvalPolicy: permissionParams.approvalPolicy,
+      sandboxPolicy: permissionParams.sandboxPolicy,
+      persistExtendedHistory: false
+    });
+    resolvedThreadId = resumeResult.thread?.id ?? threadId;
+
     const beforeRead = await client
       .request("thread/read", {
-        threadId,
+        threadId: resolvedThreadId,
         includeTurns: true
       })
-      .catch(() => ({ thread: null }));
+      .catch(() => ({ thread: resumeResult.thread ?? null }));
     const beforeCompactedAt = latestContextCompactionAt(beforeRead.thread);
 
-    await client.request("thread/compact/start", { threadId });
+    // Native Codex compaction starts asynchronously and can take tens of seconds
+    // on large threads, so keep polling the persisted thread for completion.
+    await client.request("thread/compact/start", { threadId: resolvedThreadId });
 
     let latestThread = beforeRead.thread ?? null;
     const deadline = Date.now() + Math.max(500, timeoutMs);
@@ -1002,7 +1016,7 @@ export async function compactCodexThread({
 
       const readResult = await client
         .request("thread/read", {
-          threadId,
+          threadId: resolvedThreadId,
           includeTurns: true
         })
         .catch(() => ({ thread: latestThread }));
@@ -1027,7 +1041,7 @@ export async function compactCodexThread({
 
     const finalRead = await client
       .request("thread/read", {
-        threadId,
+        threadId: resolvedThreadId,
         includeTurns: true
       })
       .catch(() => ({ thread: latestThread }));
