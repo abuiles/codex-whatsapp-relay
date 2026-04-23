@@ -235,3 +235,94 @@ test("normalizeCodexTurnNotification ignores unrelated turns and threads", () =>
     null
   );
 });
+
+test("normalizeCodexTurnNotification captures token usage updates for the active thread", () => {
+  assert.deepEqual(
+    normalizeCodexTurnNotification(
+      {
+        method: "thread/tokenUsage/updated",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          tokenUsage: {
+            total: {
+              totalTokens: 123,
+              inputTokens: 100,
+              cachedInputTokens: 5,
+              outputTokens: 23,
+              reasoningOutputTokens: 7
+            },
+            last: {
+              totalTokens: 23,
+              inputTokens: 12,
+              cachedInputTokens: 1,
+              outputTokens: 11,
+              reasoningOutputTokens: 3
+            },
+            modelContextWindow: 1050000
+          }
+        }
+      },
+      { activeTurnId: "turn-1", resolvedThreadId: "thread-1" }
+    ),
+    {
+      type: "tokenUsageUpdated",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      tokenUsage: {
+        total: {
+          totalTokens: 123,
+          inputTokens: 100,
+          cachedInputTokens: 5,
+          outputTokens: 23,
+          reasoningOutputTokens: 7
+        },
+        last: {
+          totalTokens: 23,
+          inputTokens: 12,
+          cachedInputTokens: 1,
+          outputTokens: 11,
+          reasoningOutputTokens: 3
+        },
+        modelContextWindow: 1050000
+      }
+    }
+  );
+});
+
+test("normalizeCodexTurnNotification captures context compaction lifecycle events", () => {
+  const itemCompaction = normalizeCodexTurnNotification(
+    {
+      method: "item/completed",
+      params: {
+        turnId: "turn-1",
+        item: {
+          type: "contextCompaction",
+          id: "compact-1"
+        }
+      }
+    },
+    { activeTurnId: "turn-1", resolvedThreadId: "thread-1" }
+  );
+
+  assert.equal(itemCompaction?.type, "contextCompactionCompleted");
+  assert.equal(itemCompaction?.threadId, "thread-1");
+  assert.equal(itemCompaction?.turnId, "turn-1");
+  assert.match(itemCompaction?.compactedAt ?? "", /^\d{4}-\d{2}-\d{2}T/);
+
+  const threadCompaction = normalizeCodexTurnNotification(
+    {
+      method: "thread/compacted",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-7"
+      }
+    },
+    { activeTurnId: "turn-1", resolvedThreadId: "thread-1" }
+  );
+
+  assert.equal(threadCompaction?.type, "contextCompactionCompleted");
+  assert.equal(threadCompaction?.threadId, "thread-1");
+  assert.equal(threadCompaction?.turnId, "turn-7");
+  assert.match(threadCompaction?.compactedAt ?? "", /^\d{4}-\d{2}-\d{2}T/);
+});

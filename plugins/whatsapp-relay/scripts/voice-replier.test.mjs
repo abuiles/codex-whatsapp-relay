@@ -8,6 +8,7 @@ import {
   normalizeSpeechLanguageId,
   normalizeTtsProvider,
   normalizeVoiceReplySpeed,
+  resolveKokoroLanguageConfig,
   resolveEffectiveTtsProvider
 } from "./voice-replier.mjs";
 
@@ -36,9 +37,13 @@ Also visit https://example.com/raw-url
   assert.doesNotMatch(spoken, /```/);
 });
 
-test("normalizeTtsProvider accepts system and chatterbox aliases", () => {
+test("normalizeTtsProvider accepts system, kokoro, and chatterbox aliases", () => {
   assert.equal(normalizeTtsProvider("system"), "system");
   assert.equal(normalizeTtsProvider("say"), "system");
+  assert.equal(normalizeTtsProvider("sapi"), "system");
+  assert.equal(normalizeTtsProvider("windows-sapi"), "system");
+  assert.equal(normalizeTtsProvider("kokoro"), "kokoro");
+  assert.equal(normalizeTtsProvider("kokoro-onnx"), "kokoro");
   assert.equal(normalizeTtsProvider("chatterbox"), "chatterbox-turbo");
   assert.equal(normalizeTtsProvider("chatterbox-turbo"), "chatterbox-turbo");
   assert.equal(normalizeTtsProvider("weird", "system"), "system");
@@ -96,6 +101,19 @@ test("resolveEffectiveTtsProvider keeps Chatterbox on for supported multilingual
       process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH = previous;
     }
   }
+});
+
+test("resolveEffectiveTtsProvider keeps Kokoro on for local multilingual replies", () => {
+  assert.equal(resolveEffectiveTtsProvider("kokoro", "fr"), "kokoro");
+  assert.equal(resolveEffectiveTtsProvider("kokoro-onnx", null), "kokoro");
+});
+
+test("resolveKokoroLanguageConfig maps French to the local Kokoro voice", () => {
+  assert.deepEqual(resolveKokoroLanguageConfig("fr-fr"), {
+    languageId: "fr",
+    lang: "fr-fr",
+    voice: "ff_siwis"
+  });
 });
 
 test("resolveEffectiveTtsProvider can still force system fallback for non-English replies", () => {

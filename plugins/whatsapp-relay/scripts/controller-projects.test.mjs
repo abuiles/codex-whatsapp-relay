@@ -16,19 +16,21 @@ import {
 } from "./controller-projects.mjs";
 
 test("normalizeConfiguredProjects migrates a legacy single-workspace config", () => {
+  const workspace = path.resolve("/tmp/example");
   const normalized = normalizeConfiguredProjects({
     workspace: "/tmp/example",
     defaultProject: "main"
   });
 
   assert.equal(normalized.defaultProject, "main");
-  assert.equal(normalized.workspace, "/tmp/example");
+  assert.equal(normalized.workspace, workspace);
   assert.equal(normalized.projects.length, 1);
   assert.equal(normalized.projects[0].alias, "main");
-  assert.equal(normalized.projects[0].workspace, "/tmp/example");
+  assert.equal(normalized.projects[0].workspace, workspace);
 });
 
 test("normalizeConfiguredProjects collapses duplicate workspaces down to one project", () => {
+  const workspace = path.resolve("/tmp/retail-dashboard");
   const normalized = normalizeConfiguredProjects({
     defaultProject: "main",
     projects: [
@@ -39,10 +41,11 @@ test("normalizeConfiguredProjects collapses duplicate workspaces down to one pro
 
   assert.equal(normalized.projects.length, 1);
   assert.equal(normalized.projects[0].alias, "retail-dashboard");
-  assert.equal(normalized.projects[0].workspace, "/tmp/retail-dashboard");
+  assert.equal(normalized.projects[0].workspace, workspace);
 });
 
 test("resolveConfiguredProject finds aliases and workspace basenames", () => {
+  const alphaWorkspace = path.resolve("/tmp/alpha-app");
   const config = {
     defaultProject: "relay",
     projects: [
@@ -51,8 +54,8 @@ test("resolveConfiguredProject finds aliases and workspace basenames", () => {
     ]
   };
 
-  assert.equal(resolveConfiguredProject(config, "alpha-app")?.workspace, "/tmp/alpha-app");
-  assert.equal(resolveConfiguredProject(config, "alpha app")?.workspace, "/tmp/alpha-app");
+  assert.equal(resolveConfiguredProject(config, "alpha-app")?.workspace, alphaWorkspace);
+  assert.equal(resolveConfiguredProject(config, "alpha app")?.workspace, alphaWorkspace);
 });
 
 test("findConfiguredProject resolves unique prefixes and existing workspaces", () => {

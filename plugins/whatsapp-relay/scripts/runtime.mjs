@@ -19,6 +19,7 @@ import { WhatsAppStore } from "./store.mjs";
 const require = createRequire(import.meta.url);
 const QRCode = require("qrcode-terminal/vendor/QRCode");
 const QRErrorCorrectLevel = require("qrcode-terminal/vendor/QRCode/QRErrorCorrectLevel");
+const DEFAULT_FIXED_WA_VERSION = [2, 3000, 1033893291];
 
 const VERTICAL_BLOCKS = {
   "00": " ",
@@ -87,6 +88,24 @@ function createLogger(level = "warn") {
     },
     pino.destination(2)
   );
+}
+
+function resolveWaVersion() {
+  if (process.env.WHATSAPP_USE_LATEST_VERSION === "1") {
+    return null;
+  }
+
+  const raw = process.env.WHATSAPP_FIXED_VERSION?.trim();
+  if (!raw) {
+    return DEFAULT_FIXED_WA_VERSION;
+  }
+
+  const parsed = raw
+    .split(".")
+    .map((part) => Number.parseInt(part, 10))
+    .filter((part) => Number.isFinite(part));
+
+  return parsed.length === 3 ? parsed : DEFAULT_FIXED_WA_VERSION;
 }
 
 function disconnectCode(error) {
@@ -195,7 +214,8 @@ export class WhatsAppRuntime {
   async #startInternal({ printQrToTerminal }) {
     await this.initialize();
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
-    const { version } = await fetchLatestWaWebVersion();
+    const version =
+      resolveWaVersion() ?? (await fetchLatestWaWebVersion()).version;
 
     this.state.status = "connecting";
     this.state.hasCreds = this.hasSavedCreds();

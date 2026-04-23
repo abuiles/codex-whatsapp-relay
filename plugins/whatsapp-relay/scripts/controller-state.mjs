@@ -20,6 +20,12 @@ const LEGACY_PROJECT_FIELDS = [
   "connectedThreadName",
   "lastThreadChoices",
   "lastThreadChoicesAt",
+  "lastContextAlertAt",
+  "lastContextAlertTokenUsageAt",
+  "lastContextAlertPercent",
+  "lastAutoCompactAt",
+  "lastAutoCompactTokenUsageAt",
+  "lastAutoCompactPercent",
   "lastErrorAt",
   "lastError"
 ];
@@ -50,6 +56,38 @@ function normalizeQueuedPromptList(value) {
     : [];
 }
 
+function normalizeFiniteNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeOptionalFiniteNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeTokenUsageBreakdown(value = {}) {
+  return {
+    totalTokens: normalizeFiniteNumber(value.totalTokens),
+    inputTokens: normalizeFiniteNumber(value.inputTokens),
+    cachedInputTokens: normalizeFiniteNumber(value.cachedInputTokens),
+    outputTokens: normalizeFiniteNumber(value.outputTokens),
+    reasoningOutputTokens: normalizeFiniteNumber(value.reasoningOutputTokens)
+  };
+}
+
+function normalizeThreadTokenUsage(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  return {
+    total: normalizeTokenUsageBreakdown(value.total),
+    last: normalizeTokenUsageBreakdown(value.last),
+    modelContextWindow: normalizeOptionalFiniteNumber(value.modelContextWindow)
+  };
+}
+
 export function defaultProjectSession() {
   return {
     threadId: null,
@@ -66,6 +104,15 @@ export function defaultProjectSession() {
     connectedThreadName: null,
     lastThreadChoices: [],
     lastThreadChoicesAt: null,
+    lastTokenUsage: null,
+    lastTokenUsageAt: null,
+    lastCompactedAt: null,
+    lastContextAlertAt: null,
+    lastContextAlertTokenUsageAt: null,
+    lastContextAlertPercent: null,
+    lastAutoCompactAt: null,
+    lastAutoCompactTokenUsageAt: null,
+    lastAutoCompactPercent: null,
     lastErrorAt: null,
     lastError: null,
     queuedPrompts: []
@@ -90,6 +137,7 @@ export function defaultChatSession(phoneKey = null) {
     lastInboundText: null,
     lastInboundType: null,
     lastVoiceTranscriptAt: null,
+    lastVoiceTranscriptProvider: null,
     lastVoiceTranscriptModel: null,
     lastVoiceTranscriptConfidence: null,
     lastVoiceTranscriptMinConfidence: null
@@ -122,6 +170,24 @@ function normalizeProjectSession(value = {}) {
     ...defaultProjectSession(),
     ...value,
     lastThreadChoices: Array.isArray(value.lastThreadChoices) ? value.lastThreadChoices : [],
+    lastTokenUsage: normalizeThreadTokenUsage(value.lastTokenUsage),
+    lastTokenUsageAt:
+      typeof value.lastTokenUsageAt === "string" ? value.lastTokenUsageAt : null,
+    lastCompactedAt: typeof value.lastCompactedAt === "string" ? value.lastCompactedAt : null,
+    lastContextAlertAt:
+      typeof value.lastContextAlertAt === "string" ? value.lastContextAlertAt : null,
+    lastContextAlertTokenUsageAt:
+      typeof value.lastContextAlertTokenUsageAt === "string"
+        ? value.lastContextAlertTokenUsageAt
+        : null,
+    lastContextAlertPercent: normalizeOptionalFiniteNumber(value.lastContextAlertPercent),
+    lastAutoCompactAt:
+      typeof value.lastAutoCompactAt === "string" ? value.lastAutoCompactAt : null,
+    lastAutoCompactTokenUsageAt:
+      typeof value.lastAutoCompactTokenUsageAt === "string"
+        ? value.lastAutoCompactTokenUsageAt
+        : null,
+    lastAutoCompactPercent: normalizeOptionalFiniteNumber(value.lastAutoCompactPercent),
     queuedPrompts: normalizeQueuedPromptList(value.queuedPrompts)
   };
 }
