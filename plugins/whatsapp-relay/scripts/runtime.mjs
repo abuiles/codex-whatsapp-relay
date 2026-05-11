@@ -190,6 +190,51 @@ function extensionForMimeType(mimeType) {
   return MEDIA_EXTENSION_BY_MIME.get(normalized) ?? ".bin";
 }
 
+function normalizeTimestamp(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  if (typeof value === "bigint") {
+    return Number(value);
+  }
+
+  if (typeof value === "object" && typeof value.toNumber === "function") {
+    return value.toNumber();
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeChatModifyMessage(message, fallbackChatId = null) {
+  const key = message?.key ?? null;
+  const id = typeof key?.id === "string" ? key.id.trim() : "";
+  const remoteJid =
+    typeof key?.remoteJid === "string" && key.remoteJid.trim()
+      ? key.remoteJid.trim()
+      : fallbackChatId;
+  const messageTimestamp = normalizeTimestamp(message?.messageTimestamp);
+
+  if (!id || !remoteJid || !messageTimestamp) {
+    return null;
+  }
+
+  return {
+    key: {
+      remoteJid,
+      id,
+      fromMe: Boolean(key?.fromMe),
+      ...(key?.participant ? { participant: key.participant } : {})
+    },
+    messageTimestamp
+  };
+}
+
 export class WhatsAppRuntime {
   constructor({ logLevel = "warn" } = {}) {
     this.logger = createLogger(logLevel);
@@ -446,6 +491,25 @@ export class WhatsAppRuntime {
     const filePath = path.join(dir, fileName);
     await fs.writeFile(filePath, buffer);
     return filePath;
+  }
+
+  async markChatUnread(chatId, lastMessages = []) {
+    const socket = await this.ensureConnected();
+    const normalizedMessages = (Array.isArray(lastMessages) ? lastMessages : [lastMessages])
+      .map((message) => normalizeChatModifyMessage(message, chatId))
+      .filter(Boolean);
+
+    if (!normalizedMessages.length) {
+      throw new Error("Cannot mark chat unread without a valid message reference.");
+    }
+
+    await socket.chatModify(
+      {
+        markRead: false,
+        lastMessages: normalizedMessages
+      },
+      chatId
+    );
   }
 
   async startAuthFlow(timeoutMs = 20_000) {

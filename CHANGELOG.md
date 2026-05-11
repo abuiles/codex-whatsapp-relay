@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 - Context monitoring commands, including `/ctx`, `/compact`, and `/autocompact`.
 - Windows voice setup documentation for `ffmpeg`, `whisper.cpp`, GGML Whisper models, SAPI, and Kokoro ONNX.
 - WhatsApp image forwarding for controller prompts, including local uploads and Codex `localImage` inputs.
+- Per-chat `/unread` control to mark completed Codex replies as unread in WhatsApp.
 
 ### Changed
 

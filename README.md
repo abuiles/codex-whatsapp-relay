@@ -19,6 +19,7 @@ The controller bridge is now project-aware. One chat can keep `api` busy, switch
 - approve, deny, stop, or lower permissions from WhatsApp
 - talk to Codex with voice notes and get local voice-note replies back
 - send WhatsApp images or photo albums into the active Codex project thread
+- optionally mark the WhatsApp chat unread after completed Codex replies
 - resume the same work later in your terminal with `codex resume`
 
 ## Install In Codex
@@ -160,6 +161,7 @@ Permissions and approvals:
 - `/permissions ro|ww|dfa` or `/permissions <project> read-only|workspace-write|danger-full-access` to change a project's sandbox level
 - `/approve` or `/a [project|btw] [session]`, `/deny` or `/d [project|btw]`, and `/cancel` or `/q [project|btw]` to answer pending approval prompts
 - `/stop` or `/x [project|btw]` to cancel an in-flight Codex run
+- `/unread`, `/unread on`, or `/unread off` to inspect or change whether completed Codex replies mark this WhatsApp chat unread after delivery
 - `/help` or `/h` to see command help
 
 Voice replies:
@@ -176,6 +178,8 @@ When voice replies are enabled with `/voice on` or a one-shot `reply in voice at
 If a spoken reply contains something you need to click or copy, such as a preview URL, link, slash command, or confirmation code, the bridge now sends a short text companion with those actionable bits.
 
 Project switching is sticky per chat. One-shot `/in` prompts do not change the active project, and `/btw` always uses a fresh disposable thread.
+
+Unread markers are opt-in per chat with `/unread on`. They are best-effort because WhatsApp may immediately mark the conversation read again if it is open on another linked device.
 
 ## Working Across Projects From WhatsApp
 

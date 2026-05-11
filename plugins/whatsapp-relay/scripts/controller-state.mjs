@@ -92,6 +92,44 @@ function normalizeQueuedMediaAttachments(value) {
     : [];
 }
 
+function normalizeTimestamp(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  if (typeof value === "bigint") {
+    return Number(value);
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeStoredMessageReference(value) {
+  const key = value?.key;
+  const id = typeof key?.id === "string" ? key.id.trim() : "";
+  const remoteJid = typeof key?.remoteJid === "string" ? key.remoteJid.trim() : "";
+  const messageTimestamp = normalizeTimestamp(value?.messageTimestamp);
+
+  if (!id || !remoteJid || !messageTimestamp) {
+    return null;
+  }
+
+  return {
+    key: {
+      remoteJid,
+      id,
+      fromMe: Boolean(key?.fromMe),
+      ...(key?.participant ? { participant: key.participant } : {})
+    },
+    messageTimestamp
+  };
+}
+
 function normalizeThreadTokenUsage(value) {
   if (!value || typeof value !== "object") {
     return null;
@@ -143,6 +181,7 @@ export function defaultChatSession(phoneKey = null) {
     remoteJid: null,
     activeProject: DEFAULT_PROJECT_ALIAS,
     voiceReply: null,
+    markRepliesUnread: false,
     projects: {
       [DEFAULT_PROJECT_ALIAS]: defaultProjectSession()
     },
@@ -153,6 +192,9 @@ export function defaultChatSession(phoneKey = null) {
     lastInboundAt: null,
     lastInboundText: null,
     lastInboundType: null,
+    lastInboundMessage: null,
+    lastReplyMarkedUnreadAt: null,
+    lastReplyMarkedUnreadError: null,
     lastVoiceTranscriptAt: null,
     lastVoiceTranscriptProvider: null,
     lastVoiceTranscriptModel: null,
@@ -250,6 +292,16 @@ function normalizeChatSession(value = {}, phoneKey = null) {
     phoneKey: phoneKey ?? value.phoneKey ?? null,
     activeProject,
     voiceReply: value.voiceReply ?? null,
+    markRepliesUnread: Boolean(value.markRepliesUnread),
+    lastInboundMessage: normalizeStoredMessageReference(value.lastInboundMessage),
+    lastReplyMarkedUnreadAt:
+      typeof value.lastReplyMarkedUnreadAt === "string"
+        ? value.lastReplyMarkedUnreadAt
+        : null,
+    lastReplyMarkedUnreadError:
+      typeof value.lastReplyMarkedUnreadError === "string"
+        ? value.lastReplyMarkedUnreadError
+        : null,
     projects,
     btw: {
       ...defaultChatSession().btw,

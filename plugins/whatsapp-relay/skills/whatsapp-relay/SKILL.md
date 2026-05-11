@@ -41,6 +41,7 @@ Use this skill when the user wants to connect WhatsApp, inspect recent chats, re
    - send `/autocompact` to inspect or change context alerts and idle auto-compaction
    - send `/permissions` or `/p` to inspect the current permission level
    - send `/voice` to inspect or change outbound voice-reply mode for that chat
+   - send `/unread` to inspect or change whether completed replies mark the chat unread
    - send `/permissions ro|ww|dfa` or `/permissions read-only|workspace-write|danger-full-access` to change the session sandbox level
    - send `/approve` or `/a`, `/approve session`, `/deny` or `/d`, or `/cancel` or `/q` to answer pending approvals in `workspace-write`
    - send `/stop` or `/x` to cancel the in-flight Codex run

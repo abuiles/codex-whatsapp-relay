@@ -19,6 +19,7 @@ import {
   parseContextMonitorCommandPayload,
   parseModelCommandPayload,
   parseNextStepsCommandPayload,
+  parseUnreadCommandPayload,
   parseReasoningCommandPayload,
   parseMissionCommandPayload,
   parseVoiceReplyCommandPayload,
@@ -50,6 +51,10 @@ test("parseIncomingCommand accepts shortcut aliases for admin commands", () => {
   assert.deepEqual(parseIncomingCommand("/nextsteps off", true), {
     type: "nextSteps",
     payload: "off"
+  });
+  assert.deepEqual(parseIncomingCommand("/unread on", true), {
+    type: "unreadSettings",
+    payload: "on"
   });
   assert.deepEqual(parseIncomingCommand("/mission erp-mvp improve cockpit flow", true), {
     type: "mission",
@@ -263,6 +268,16 @@ test("parseNextStepsCommandPayload handles status and toggles", () => {
   assert.deepEqual(parseNextStepsCommandPayload("off"), { action: "off" });
   assert.deepEqual(parseNextStepsCommandPayload("desactiver"), { action: "off" });
   assert.deepEqual(parseNextStepsCommandPayload("maybe"), { action: "unknown" });
+});
+
+test("parseUnreadCommandPayload handles status and toggles", () => {
+  assert.deepEqual(parseUnreadCommandPayload(""), { action: "status" });
+  assert.deepEqual(parseUnreadCommandPayload("status"), { action: "status" });
+  assert.deepEqual(parseUnreadCommandPayload("on"), { action: "on" });
+  assert.deepEqual(parseUnreadCommandPayload("activer"), { action: "on" });
+  assert.deepEqual(parseUnreadCommandPayload("off"), { action: "off" });
+  assert.deepEqual(parseUnreadCommandPayload("desactiver"), { action: "off" });
+  assert.deepEqual(parseUnreadCommandPayload("maybe"), { action: "unknown" });
 });
 
 test("parseMissionCommandPayload handles starts and controls", () => {
@@ -1267,6 +1282,115 @@ test("handleVoiceReplyCommand updates active runs without requiring /stop", asyn
       replies[0],
       "Voice replies are now on for this chat at 2x. Active runs will use the new voice setting."
     );
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("handleUnreadCommand toggles mark-replies-unread for the chat", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "unread-mode-test-"));
+  const filePath = path.join(tempDir, "controller-state.json");
+
+  try {
+    const stateStore = new ControllerStateStore(filePath);
+    await stateStore.load();
+    await stateStore.upsertSession("123", {
+      phoneKey: "123",
+      activeProject: "alpha-app",
+      remoteJid: "123@s.whatsapp.net",
+      label: "Test User"
+    });
+
+    const bridge = new WhatsAppControllerBridge({
+      runtime: {},
+      configStore: {
+        data: {
+          defaultProject: "alpha-app",
+          permissionLevel: "workspace-write"
+        }
+      },
+      stateStore
+    });
+
+    const replies = [];
+    bridge.sendReply = async (_remoteJid, text) => {
+      replies.push(text);
+    };
+
+    await bridge.handleUnreadCommand({
+      phoneKey: "123",
+      remoteJid: "123@s.whatsapp.net",
+      payload: "on",
+      label: "Test User"
+    });
+
+    assert.equal(stateStore.getSession("123").markRepliesUnread, true);
+    assert.match(replies[0], /will now mark/i);
+
+    await bridge.handleUnreadCommand({
+      phoneKey: "123",
+      remoteJid: "123@s.whatsapp.net",
+      payload: "off",
+      label: "Test User"
+    });
+
+    assert.equal(stateStore.getSession("123").markRepliesUnread, false);
+    assert.match(replies[1], /will no longer mark/i);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("maybeMarkReplyUnread asks runtime to mark the chat unread after replies", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "unread-after-reply-test-"));
+  const filePath = path.join(tempDir, "controller-state.json");
+
+  try {
+    const stateStore = new ControllerStateStore(filePath);
+    await stateStore.load();
+    await stateStore.upsertSession("123", {
+      phoneKey: "123",
+      activeProject: "alpha-app",
+      remoteJid: "123@s.whatsapp.net",
+      label: "Test User",
+      markRepliesUnread: true
+    });
+
+    const calls = [];
+    const bridge = new WhatsAppControllerBridge({
+      runtime: {
+        async markChatUnread(chatId, messages) {
+          calls.push({ chatId, messages });
+        }
+      },
+      configStore: {
+        data: {
+          defaultProject: "alpha-app",
+          permissionLevel: "workspace-write"
+        }
+      },
+      stateStore
+    });
+
+    const marked = await bridge.maybeMarkReplyUnread({
+      phoneKey: "123",
+      remoteJid: "123@s.whatsapp.net",
+      sentMessage: {
+        key: {
+          remoteJid: "123@s.whatsapp.net",
+          id: "sent-1",
+          fromMe: true
+        },
+        messageTimestamp: 1778520000
+      }
+    });
+
+    assert.equal(marked, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].chatId, "123@s.whatsapp.net");
+    assert.equal(calls[0].messages[0].key.id, "sent-1");
+    assert.equal(stateStore.getSession("123").lastReplyMarkedUnreadError, null);
+    assert.match(stateStore.getSession("123").lastReplyMarkedUnreadAt, /^\d{4}-/);
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true });
   }

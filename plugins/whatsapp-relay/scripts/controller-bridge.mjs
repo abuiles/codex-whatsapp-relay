@@ -143,6 +143,9 @@ const COMMAND_ALIASES = new Map([
   ["ww", "permissionShortcut"],
   ["dfa", "permissionShortcut"],
   ["voice", "voice"],
+  ["unread", "unread"],
+  ["nonlu", "unread"],
+  ["non-lu", "unread"],
   ["sessions", "sessions"],
   ["threads", "sessions"],
   ["ls", "sessions"],
@@ -594,6 +597,7 @@ function helpText() {
     "/permissions or /p [project] [ro|ww|dfa] -> inspect or change read-only, workspace-write, or danger-full-access",
     "/ro, /ww, /dfa -> quick permission switch for the active project",
     "/voice [status|on|off] [1x|2x] -> inspect or change voice reply mode for this chat",
+    "/unread [status|on|off] -> mark this chat unread after completed Codex replies",
     "/approve or /a [project|btw] [session] -> approve the pending action once or for this session",
     "/deny or /d [project|btw] -> decline the pending action",
     "/cancel or /q [project|btw] -> cancel the pending action",
@@ -622,6 +626,27 @@ function resolveSessionVoiceReply(session = {}) {
 
 function formatVoiceReplySummary(voiceReply) {
   return voiceReply.enabled ? `on (${voiceReply.speed})` : "off";
+}
+
+function resolveSessionUnreadReplies(session = {}) {
+  return session.markRepliesUnread === true;
+}
+
+function formatUnreadRepliesSummary(enabled) {
+  return enabled ? "on" : "off";
+}
+
+function formatUnreadRepliesStatus(session, prelude = null) {
+  const enabled = resolveSessionUnreadReplies(session);
+  return [
+    prelude,
+    `Mark replies unread: ${formatUnreadRepliesSummary(enabled)}.`,
+    enabled
+      ? "Completed Codex replies will mark this WhatsApp chat as unread after delivery."
+      : "Completed Codex replies will leave this WhatsApp chat in its normal read state."
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function cloneVoiceReplySetting(voiceReply = {}) {
@@ -687,6 +712,27 @@ export function parseVoiceReplyCommandPayload(payload) {
 
   if (VOICE_REPLY_SPEEDS.has(normalizedFirst)) {
     return { action: "on", speed: normalizedFirst };
+  }
+
+  return { action: "unknown" };
+}
+
+export function parseUnreadCommandPayload(payload) {
+  const normalized = normalizeVoiceCommandText(payload);
+  if (!normalized || normalized === "status") {
+    return { action: "status" };
+  }
+
+  if (["on", "enable", "enabled", "active", "activer", "oui", "yes"].includes(normalized)) {
+    return { action: "on" };
+  }
+
+  if (
+    ["off", "disable", "disabled", "inactive", "desactiver", "non", "no"].includes(
+      normalized
+    )
+  ) {
+    return { action: "off" };
   }
 
   return { action: "unknown" };
@@ -1153,6 +1199,30 @@ function shouldIgnoreInboundSystemMessage(messageType) {
   ]).has(String(messageType ?? "").trim());
 }
 
+function normalizeMessageReference(message, fallbackRemoteJid = null) {
+  const key = message?.key ?? null;
+  const id = typeof key?.id === "string" ? key.id.trim() : "";
+  const remoteJid =
+    typeof key?.remoteJid === "string" && key.remoteJid.trim()
+      ? key.remoteJid.trim()
+      : fallbackRemoteJid;
+  const messageTimestamp = normalizeTimestamp(message?.messageTimestamp);
+
+  if (!id || !remoteJid || !messageTimestamp) {
+    return null;
+  }
+
+  return {
+    key: {
+      remoteJid,
+      id,
+      fromMe: Boolean(key?.fromMe),
+      ...(key?.participant ? { participant: key.participant } : {})
+    },
+    messageTimestamp
+  };
+}
+
 function normalizePositiveInteger(value) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : 0;
@@ -1357,6 +1427,8 @@ export function parseIncomingCommand(text, captureAllDirectMessages) {
       }
       case "voice":
         return { type: "voiceReplySettings", payload };
+      case "unread":
+        return { type: "unreadSettings", payload };
       case "sessions":
         return { type: "sessions", payload };
       case "connect":
@@ -3560,7 +3632,8 @@ export class WhatsAppControllerBridge {
             : albumMessage
               ? "[album]"
               : `[${message.key?.id ?? "message"}]`),
-      lastInboundType: audioMessage ? "voice" : imageMessage ? "image" : messageType
+      lastInboundType: audioMessage ? "voice" : imageMessage ? "image" : messageType,
+      lastInboundMessage: normalizeMessageReference(message, remoteJid)
     });
 
     let command = null;
@@ -3822,6 +3895,14 @@ export class WhatsAppControllerBridge {
         return;
       case "voiceReplySettings":
         await this.handleVoiceReplyCommand({
+          phoneKey,
+          remoteJid,
+          payload: command.payload,
+          label
+        });
+        return;
+      case "unreadSettings":
+        await this.handleUnreadCommand({
           phoneKey,
           remoteJid,
           payload: command.payload,
@@ -4221,6 +4302,7 @@ export class WhatsAppControllerBridge {
         `queued_messages: ${this.queuedPromptCount(phoneKey, { scopeType: "btw" })}`,
         `model: ${formatModelSummary(modelState)}`,
         `voice_reply: ${formatVoiceReplySummary(voiceReply)}`,
+        `mark_replies_unread: ${formatUnreadRepliesSummary(resolveSessionUnreadReplies(chatSession))}`,
         ...buildActiveRunStatusLines(btw),
         btw?.pendingApproval ? `approval_pending: yes (${btw.pendingApproval.kind})` : null
       ]
@@ -4260,6 +4342,7 @@ export class WhatsAppControllerBridge {
       `permissions: ${permissionLevel}`,
       `voice_reply: ${formatVoiceReplySummary(voiceReply)}`,
       `voice_reply_provider: ${resolveConfiguredTtsProvider(config)}`,
+      `mark_replies_unread: ${formatUnreadRepliesSummary(resolveSessionUnreadReplies(chatSession))}`,
       ...buildContextMonitorLines(config),
       busyProjects.length ? `busy_projects: ${busyProjects.join(", ")}` : null,
       this.btwRun(phoneKey) ? "btw_busy: yes" : null,
@@ -4275,7 +4358,7 @@ export class WhatsAppControllerBridge {
       projectSession.lastPromptAt ? `last_prompt_at: ${projectSession.lastPromptAt}` : null,
       projectSession.lastReplyAt ? `last_reply_at: ${projectSession.lastReplyAt}` : null,
       "",
-      "Commands: /project, /mission, /model, /models, /reasoning, /ctx, /compact, /autocompact, /in, /btw, /n, /ls, /session, /p, /ro, /ww, /dfa, /voice, /x, /h"
+      "Commands: /project, /mission, /model, /models, /reasoning, /ctx, /compact, /autocompact, /in, /btw, /n, /ls, /session, /p, /ro, /ww, /dfa, /voice, /unread, /x, /h"
     ]
       .filter(Boolean)
       .join("\n");
@@ -5730,6 +5813,46 @@ export class WhatsAppControllerBridge {
     );
   }
 
+  async handleUnreadCommand({ phoneKey, remoteJid, payload, label }) {
+    const session = this.getChatSession(phoneKey);
+    const parsed = parseUnreadCommandPayload(payload);
+
+    if (parsed.action === "status") {
+      await this.sendReply(remoteJid, formatUnreadRepliesStatus(session));
+      return;
+    }
+
+    if (parsed.action === "unknown") {
+      await this.sendReply(
+        remoteJid,
+        [
+          `Unknown unread setting "${String(payload ?? "").trim()}".`,
+          "Usage: /unread, /unread on, /unread off."
+        ].join("\n")
+      );
+      return;
+    }
+
+    const enabled = parsed.action === "on";
+    await this.upsertChatSession(phoneKey, {
+      phoneKey,
+      remoteJid,
+      label,
+      markRepliesUnread: enabled,
+      lastReplyMarkedUnreadError: null
+    });
+
+    await this.sendReply(
+      remoteJid,
+      formatUnreadRepliesStatus(
+        this.getChatSession(phoneKey),
+        enabled
+          ? "Completed Codex replies will now mark this WhatsApp chat as unread."
+          : "Completed Codex replies will no longer mark this WhatsApp chat as unread."
+      )
+    );
+  }
+
   async handlePermissionsCommand({ phoneKey, remoteJid, payload, label }) {
     const config = this.configStore.data;
     const activeProject = this.getActiveProject(phoneKey);
@@ -6311,21 +6434,26 @@ export class WhatsAppControllerBridge {
 
       if (currentVoiceReply.enabled) {
         const ttsProvider = resolveConfiguredTtsProvider(this.configStore.data);
-        await this.sendReply(remoteJid, fullReplyText);
+        let lastSentMessage = await this.sendReply(remoteJid, fullReplyText);
         try {
-          await this.sendVoiceReply(
+          lastSentMessage = await this.sendVoiceReply(
             remoteJid,
             replyText,
             currentVoiceReply,
             replyEnvelope.languageId,
             ttsProvider
-          );
+          ) ?? lastSentMessage;
         } catch (error) {
-          await this.sendReply(
+          lastSentMessage = await this.sendReply(
             remoteJid,
             `Failed to generate the voice reply locally with ${ttsProvider}: ${error.message}`
-          );
+          ) ?? lastSentMessage;
         }
+        await this.maybeMarkReplyUnread({
+          phoneKey,
+          remoteJid,
+          sentMessage: lastSentMessage
+        });
         if (scopeType === "project") {
           await this.maybeHandleContextPressure({
             phoneKey,
@@ -6344,7 +6472,12 @@ export class WhatsAppControllerBridge {
         return;
       }
 
-      await this.sendReply(remoteJid, fullReplyText);
+      const lastSentMessage = await this.sendReply(remoteJid, fullReplyText);
+      await this.maybeMarkReplyUnread({
+        phoneKey,
+        remoteJid,
+        sentMessage: lastSentMessage
+      });
       if (scopeType === "project") {
         await this.maybeHandleContextPressure({
           phoneKey,
@@ -6408,8 +6541,50 @@ export class WhatsAppControllerBridge {
     }
   }
 
+  async maybeMarkReplyUnread({ phoneKey, remoteJid, sentMessage = null }) {
+    const session = this.getChatSession(phoneKey);
+    if (!resolveSessionUnreadReplies(session)) {
+      return false;
+    }
+
+    const messageReference =
+      normalizeMessageReference(sentMessage, remoteJid) ??
+      normalizeMessageReference(session.lastInboundMessage, remoteJid);
+
+    if (!messageReference) {
+      await this.upsertChatSession(phoneKey, {
+        phoneKey,
+        remoteJid,
+        lastReplyMarkedUnreadError: "No valid message reference was available."
+      });
+      return false;
+    }
+
+    try {
+      await this.runtime.markChatUnread(remoteJid, [messageReference]);
+      await this.upsertChatSession(phoneKey, {
+        phoneKey,
+        remoteJid,
+        lastReplyMarkedUnreadAt: new Date().toISOString(),
+        lastReplyMarkedUnreadError: null
+      });
+      return true;
+    } catch (error) {
+      await this.upsertChatSession(phoneKey, {
+        phoneKey,
+        remoteJid,
+        lastReplyMarkedUnreadError: error?.message ?? String(error)
+      });
+      this.runtime?.logger?.warn?.(
+        { err: error, chatId: remoteJid },
+        "failed to mark WhatsApp chat unread"
+      );
+      return false;
+    }
+  }
+
   async sendReply(remoteJid, text) {
-    await this.sendTextMessage(remoteJid, sanitizeReplyTextForWhatsApp(text));
+    return this.sendTextMessage(remoteJid, sanitizeReplyTextForWhatsApp(text));
   }
 
   async sendVoiceReply(remoteJid, text, voiceReply, languageIdHint = null, provider = null) {
@@ -6419,7 +6594,7 @@ export class WhatsAppControllerBridge {
       languageIdHint,
       provider: provider ?? resolveConfiguredTtsProvider(this.configStore.data)
     });
-    await this.sendVoiceNoteMessage(remoteJid, synthesized.audioBuffer, {
+    return this.sendVoiceNoteMessage(remoteJid, synthesized.audioBuffer, {
       mimetype: synthesized.mimetype,
       seconds: synthesized.seconds
     });
@@ -6427,11 +6602,15 @@ export class WhatsAppControllerBridge {
 
   async sendTextMessage(chatId, text) {
     const socket = await this.runtime.ensureConnected();
+    let lastSent = null;
 
     for (const part of splitMessage(text)) {
       const sent = await socket.sendMessage(chatId, { text: part });
       this.rememberOutgoingMessage(sent?.key?.id ?? null);
+      lastSent = sent;
     }
+
+    return lastSent;
   }
 
   async sendVoiceNoteMessage(chatId, audioBuffer, { mimetype, seconds } = {}) {
@@ -6448,5 +6627,6 @@ export class WhatsAppControllerBridge {
 
     const sent = await socket.sendMessage(chatId, content);
     this.rememberOutgoingMessage(sent?.key?.id ?? null);
+    return sent;
   }
 }
