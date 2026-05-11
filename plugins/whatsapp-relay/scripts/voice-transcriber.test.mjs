@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  isLikelyTranscriptionBoilerplate,
   normalizeSttProvider,
   parseWhisperCppTranscript
 } from "./voice-transcriber.mjs";
@@ -47,4 +48,19 @@ test("parseWhisperCppTranscript extracts text and segment timing", () => {
   assert.equal(parsed.sentences[0].end, 1.5);
   assert.equal(parsed.sentences[1].start, 1.5);
   assert.equal(parsed.sentences[1].end, 3);
+});
+
+test("isLikelyTranscriptionBoilerplate rejects common subtitle hallucinations", () => {
+  assert.equal(
+    isLikelyTranscriptionBoilerplate("Sous-titres réalisés par la communauté d'Amara.org"),
+    true
+  );
+  assert.equal(
+    isLikelyTranscriptionBoilerplate("Subtitles by the Amara.org community"),
+    true
+  );
+  assert.equal(
+    isLikelyTranscriptionBoilerplate("Peux-tu analyser le dashboard ERP ?"),
+    false
+  );
 });

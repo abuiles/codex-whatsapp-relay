@@ -6,6 +6,7 @@ import path from "node:path";
 
 import {
   applyRunLifecycleEvent,
+  buildNextStepsPrompt,
   buildVoiceReplyTextCompanion,
   buildDangerFullAccessConfirmationMessage,
   formatProjectRunReplyPrefix,
@@ -17,6 +18,9 @@ import {
   parseApprovalTargetPayload,
   parseContextMonitorCommandPayload,
   parseModelCommandPayload,
+  parseNextStepsCommandPayload,
+  parseReasoningCommandPayload,
+  parseMissionCommandPayload,
   parseVoiceReplyCommandPayload,
   normalizeVoiceCommandText,
   parseIncomingCommand,
@@ -38,6 +42,18 @@ test("parseIncomingCommand accepts shortcut aliases for admin commands", () => {
   assert.deepEqual(parseIncomingCommand("/models gpt-5.5", true), {
     type: "models",
     payload: "gpt-5.5"
+  });
+  assert.deepEqual(parseIncomingCommand("/reasoning xhigh", true), {
+    type: "reasoning",
+    payload: "xhigh"
+  });
+  assert.deepEqual(parseIncomingCommand("/nextsteps off", true), {
+    type: "nextSteps",
+    payload: "off"
+  });
+  assert.deepEqual(parseIncomingCommand("/mission erp-mvp improve cockpit flow", true), {
+    type: "mission",
+    payload: "erp-mvp improve cockpit flow"
   });
   assert.deepEqual(parseIncomingCommand("/n review this diff", true), {
     type: "new",
@@ -174,6 +190,159 @@ test("parseModelCommandPayload handles status, overrides, and resets", () => {
     scope: "project",
     projectAlias: "beta-app",
     model: null,
+    ambiguousProjects: []
+  });
+});
+
+test("parseReasoningCommandPayload handles status, overrides, aliases, and resets", () => {
+  const config = {
+    defaultProject: "alpha-app",
+    modelReasoningEffort: "medium",
+    projects: [
+      { alias: "alpha-app", workspace: "/workspace/alpha-app" },
+      {
+        alias: "beta-app",
+        workspace: "/workspace/beta-app",
+        modelReasoningEffort: "high"
+      }
+    ]
+  };
+
+  assert.deepEqual(parseReasoningCommandPayload("", config), {
+    action: "status",
+    scope: "project",
+    projectAlias: null,
+    reasoning: null,
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseReasoningCommandPayload("global", config), {
+    action: "status",
+    scope: "global",
+    projectAlias: null,
+    reasoning: null,
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseReasoningCommandPayload("tres approfondi", config), {
+    action: "set",
+    scope: "project",
+    projectAlias: null,
+    reasoning: "xhigh",
+    rawReasoning: "tres approfondi",
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseReasoningCommandPayload("beta-app eleve", config), {
+    action: "set",
+    scope: "project",
+    projectAlias: "beta-app",
+    reasoning: "high",
+    rawReasoning: "eleve",
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseReasoningCommandPayload("global xhigh", config), {
+    action: "set",
+    scope: "global",
+    projectAlias: null,
+    reasoning: "xhigh",
+    rawReasoning: "xhigh",
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseReasoningCommandPayload("reset beta-app", config), {
+    action: "reset",
+    scope: "project",
+    projectAlias: "beta-app",
+    reasoning: null,
+    ambiguousProjects: []
+  });
+});
+
+test("parseNextStepsCommandPayload handles status and toggles", () => {
+  assert.deepEqual(parseNextStepsCommandPayload(""), { action: "status" });
+  assert.deepEqual(parseNextStepsCommandPayload("status"), { action: "status" });
+  assert.deepEqual(parseNextStepsCommandPayload("on"), { action: "on" });
+  assert.deepEqual(parseNextStepsCommandPayload("activer"), { action: "on" });
+  assert.deepEqual(parseNextStepsCommandPayload("off"), { action: "off" });
+  assert.deepEqual(parseNextStepsCommandPayload("desactiver"), { action: "off" });
+  assert.deepEqual(parseNextStepsCommandPayload("maybe"), { action: "unknown" });
+});
+
+test("parseMissionCommandPayload handles starts and controls", () => {
+  const config = {
+    defaultProject: "alpha-app",
+    projects: [
+      { alias: "alpha-app", workspace: "/workspace/alpha-app" },
+      { alias: "beta-app", workspace: "/workspace/beta-app" }
+    ]
+  };
+
+  assert.deepEqual(parseMissionCommandPayload("", config), {
+    action: "status",
+    projectAlias: null,
+    objective: "",
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseMissionCommandPayload("status beta-app", config), {
+    action: "status",
+    projectAlias: "beta-app",
+    objective: "",
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseMissionCommandPayload("stop beta-app", config), {
+    action: "stop",
+    projectAlias: "beta-app",
+    objective: "",
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseMissionCommandPayload("2", config), {
+    action: "select",
+    projectAlias: null,
+    objective: "",
+    selectionIndex: 2,
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseMissionCommandPayload("cancel", config), {
+    action: "cancel",
+    projectAlias: null,
+    objective: "",
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseMissionCommandPayload("beta-app improve cockpit", config), {
+    action: "start",
+    projectAlias: "beta-app",
+    objective: "improve cockpit",
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseMissionCommandPayload("current beta-app improve cockpit", config), {
+    action: "start",
+    projectAlias: "beta-app",
+    objective: "improve cockpit",
+    ambiguousProjects: [],
+    branchMode: "current"
+  });
+  assert.deepEqual(parseMissionCommandPayload("new-branch beta-app improve cockpit", config), {
+    action: "start",
+    projectAlias: "beta-app",
+    objective: "improve cockpit",
+    ambiguousProjects: [],
+    branchMode: "new"
+  });
+  assert.deepEqual(parseMissionCommandPayload("new beta-app improve cockpit", config), {
+    action: "start",
+    projectAlias: "beta-app",
+    objective: "improve cockpit",
+    ambiguousProjects: [],
+    forceNewThread: true
+  });
+  assert.deepEqual(parseMissionCommandPayload("nouvelle session improve cockpit", config), {
+    action: "start",
+    projectAlias: null,
+    objective: "improve cockpit",
+    ambiguousProjects: [],
+    forceNewThread: true
+  });
+  assert.deepEqual(parseMissionCommandPayload("improve cockpit", config), {
+    action: "start",
+    projectAlias: null,
+    objective: "improve cockpit",
     ambiguousProjects: []
   });
 });
@@ -988,6 +1157,14 @@ test("buildVoiceReplyPrompt instructs Codex to emit a hidden reply language tag"
   assert.match(prompt, /\[\[reply_language:<language-code>\]\]/);
   assert.match(prompt, /for example fr, en, es, it, or pt-BR/i);
   assert.match(prompt, /do not mention the metadata/i);
+});
+
+test("buildNextStepsPrompt asks for compact recommended next steps", () => {
+  const prompt = buildNextStepsPrompt("Analyse cette section.");
+  assert.match(prompt, /^Analyse cette section\./);
+  assert.match(prompt, /recommended next steps/i);
+  assert.match(prompt, /1-3 concrete next actions/i);
+  assert.match(prompt, /\/mission run/i);
 });
 
 test("extractVoiceReplyEnvelope strips the language tag before delivery", () => {

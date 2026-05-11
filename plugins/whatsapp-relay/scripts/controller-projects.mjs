@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { resolvePermissionLevel } from "./controller-permissions.mjs";
+import { normalizeReasoningEffort } from "./controller-reasoning.mjs";
 import { repoRoot } from "./paths.mjs";
 
 const DEFAULT_PROJECT_ALIAS = "main";
@@ -134,6 +135,7 @@ export function defaultProjectConfig() {
     alias: DEFAULT_PROJECT_ALIAS,
     workspace: repoRoot,
     model: null,
+    modelReasoningEffort: null,
     profile: null,
     permissionLevel: null,
     search: null
@@ -149,6 +151,7 @@ function normalizeProjectConfig(project = {}, { fallbackAlias = DEFAULT_PROJECT_
     ),
     workspace,
     model: project.model ?? null,
+    modelReasoningEffort: normalizeReasoningEffort(project.modelReasoningEffort),
     profile: project.profile ?? null,
     permissionLevel: project.permissionLevel
       ? resolvePermissionLevel(project.permissionLevel)
@@ -166,6 +169,7 @@ export function normalizeConfiguredProjects(config = {}) {
             alias: config.defaultProject ?? DEFAULT_PROJECT_ALIAS,
             workspace: config.workspace ?? repoRoot,
             model: config.model ?? null,
+            modelReasoningEffort: config.modelReasoningEffort ?? null,
             profile: config.profile ?? null,
             permissionLevel: null,
             search: null

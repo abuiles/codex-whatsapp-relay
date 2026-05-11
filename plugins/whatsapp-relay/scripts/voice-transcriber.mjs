@@ -70,6 +70,40 @@ function resolveDefaultModel(provider) {
   return provider === "whisper-cpp" ? DEFAULT_WHISPER_CPP_MODEL : DEFAULT_PARAKEET_MODEL;
 }
 
+function normalizeTranscriptFingerprint(value) {
+  return String(value ?? "")
+    .normalize("NFKD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function isLikelyTranscriptionBoilerplate(transcript) {
+  const normalized = normalizeTranscriptFingerprint(transcript);
+  if (!normalized) {
+    return false;
+  }
+
+  const boilerplates = [
+    "sous titres realises par la communaute d amara org",
+    "sous titrage realise par la communaute d amara org",
+    "sous titres par la communaute d amara org",
+    "subtitles by the amara org community",
+    "captions by the amara org community",
+    "subtitling by the amara org community",
+    "amara org community"
+  ];
+
+  return boilerplates.some(
+    (boilerplate) =>
+      normalized === boilerplate ||
+      (normalized.length <= boilerplate.length + 20 && normalized.includes(boilerplate))
+  );
+}
+
 function extensionForMimeType(mimeType) {
   const normalized = String(mimeType ?? "").toLowerCase();
   if (normalized.includes("ogg")) {
@@ -401,6 +435,11 @@ export async function transcribeVoiceNote({
     const transcript = String(parsed.transcript ?? "").trim();
     if (!transcript) {
       throw new Error("Voice note transcription was empty.");
+    }
+    if (isLikelyTranscriptionBoilerplate(transcript)) {
+      throw new Error(
+        "Voice note transcription looked like subtitle boilerplate, not speech. Please try again with a clearer or longer note, or type the prompt."
+      );
     }
 
     const sentences = Array.isArray(parsed.sentences) ? parsed.sentences : [];

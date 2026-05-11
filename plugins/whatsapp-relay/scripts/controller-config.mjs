@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { defaultProjectConfig, normalizeConfiguredProjects } from "./controller-projects.mjs";
 import { resolvePermissionLevel } from "./controller-permissions.mjs";
+import { normalizeReasoningEffort } from "./controller-reasoning.mjs";
 import { authDir, controllerConfigFile, repoRoot } from "./paths.mjs";
 import { normalizeTtsProvider } from "./voice-replier.mjs";
 
@@ -104,9 +105,11 @@ function defaultConfig() {
     projects: [],
     codexBin: "codex",
     model: null,
+    modelReasoningEffort: null,
     profile: null,
     permissionLevel: "workspace-write",
     search: false,
+    replyNextStepsEnabled: true,
     captureAllDirectMessages: true,
     ttsProvider: "chatterbox-turbo",
     ttsChatterboxAllowNonEnglish: true,
@@ -126,6 +129,8 @@ function normalizeConfig(config = {}) {
 
   delete merged.fullAuto;
   merged.permissionLevel = resolvePermissionLevel(merged.permissionLevel);
+  merged.modelReasoningEffort = normalizeReasoningEffort(merged.modelReasoningEffort);
+  merged.replyNextStepsEnabled = normalizeBooleanish(merged.replyNextStepsEnabled, true);
   merged.ttsProvider = normalizeTtsProvider(merged.ttsProvider, "chatterbox-turbo");
   merged.ttsChatterboxAllowNonEnglish = normalizeBooleanish(
     merged.ttsChatterboxAllowNonEnglish,

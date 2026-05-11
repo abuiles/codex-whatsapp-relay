@@ -16,6 +16,7 @@ test("ControllerConfigStore defaults to multilingual Chatterbox for new configs"
 
     assert.equal(config.ttsProvider, "chatterbox-turbo");
     assert.equal(config.ttsChatterboxAllowNonEnglish, true);
+    assert.equal(config.replyNextStepsEnabled, true);
     assert.equal(config.defaultProject, "main");
     assert.equal(config.projects.length, 1);
     assert.equal(config.projects[0].alias, "main");
@@ -45,6 +46,30 @@ test("ControllerConfigStore normalizes boolean-like non-English overrides from d
 
     assert.equal(config.ttsProvider, "chatterbox-turbo");
     assert.equal(config.ttsChatterboxAllowNonEnglish, false);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("ControllerConfigStore normalizes boolean-like next-step reply guidance", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "controller-config-test-"));
+  const filePath = path.join(tempDir, "controller-config.json");
+
+  try {
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({
+        enabled: true,
+        replyNextStepsEnabled: "off",
+        allowedControllers: []
+      }),
+      "utf8"
+    );
+
+    const store = new ControllerConfigStore(filePath);
+    const config = await store.load();
+
+    assert.equal(config.replyNextStepsEnabled, false);
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true });
   }

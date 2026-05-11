@@ -31,8 +31,19 @@ import {
   permissionLevelHelpList,
   resolvePermissionLevel
 } from "./controller-permissions.mjs";
+import {
+  formatReasoningEffortSetting,
+  isReasoningResetToken,
+  normalizeReasoningEffort,
+  reasoningEffortHelpList
+} from "./controller-reasoning.mjs";
 import { drainControllerCommands } from "./controller-outbox.mjs";
 import { ControllerStateStore, defaultProjectSession } from "./controller-state.mjs";
+import {
+  buildMissionPrompt,
+  listMissionBranchChoices,
+  prepareMissionBranch
+} from "./mission-control.mjs";
 import { extractAudioMessage, extractMessageText, extractMessageType } from "./store.mjs";
 import {
   DEFAULT_TRANSCRIPTION_MODEL,
@@ -81,6 +92,17 @@ const COMMAND_ALIASES = new Map([
   ["st", "status"],
   ["model", "model"],
   ["models", "models"],
+  ["reasoning", "reasoning"],
+  ["reason", "reasoning"],
+  ["effort", "reasoning"],
+  ["thinking", "reasoning"],
+  ["reflexion", "reasoning"],
+  ["nextsteps", "nextSteps"],
+  ["next-steps", "nextSteps"],
+  ["steps", "nextSteps"],
+  ["next", "nextSteps"],
+  ["etapes", "nextSteps"],
+  ["mission", "mission"],
   ["context", "context"],
   ["ctx", "context"],
   ["compact", "compact"],
@@ -544,6 +566,14 @@ function helpText() {
     "/status or /st [project] -> show the current project session or another project's session",
     "/model [status|reset|global|<slug>] -> inspect or change the active project's model override",
     "/models [slug] -> list locally visible Codex models or check one model slug",
+    "/reasoning [status|reset|global|low|medium|high|xhigh] -> inspect or change reasoning effort for the active project",
+    "/nextsteps [status|on|off] -> add or remove a short recommended next-steps section in normal Codex replies",
+    "/mission [project] <objective> -> prepare a cockpit-oriented ERP mission and ask which branch to use",
+    "/mission <number> -> start the pending mission with the numbered branch choice",
+    "/mission current [project] <objective> -> start immediately on the current branch",
+    "/mission new-branch [project] <objective> -> start immediately on a new mission branch",
+    "/mission fresh [project] <objective> -> prepare the mission in a fresh Codex thread",
+    "/mission status|report|stop [project] -> inspect or stop the current mission-style run",
     "/context or /ctx [project] -> inspect the latest observed context usage for a project session",
     "/compact [project] -> compact a project thread with native Codex compaction",
     "/autocompact [status|on|off|alert on|alert off] [percent] -> manage context alerts and idle auto-compaction",
@@ -648,6 +678,27 @@ export function parseVoiceReplyCommandPayload(payload) {
 
   if (VOICE_REPLY_SPEEDS.has(normalizedFirst)) {
     return { action: "on", speed: normalizedFirst };
+  }
+
+  return { action: "unknown" };
+}
+
+export function parseNextStepsCommandPayload(payload) {
+  const normalized = normalizeVoiceCommandText(payload);
+  if (!normalized || normalized === "status") {
+    return { action: "status" };
+  }
+
+  if (["on", "enable", "enabled", "active", "activer", "oui", "yes"].includes(normalized)) {
+    return { action: "on" };
+  }
+
+  if (
+    ["off", "disable", "disabled", "inactive", "desactiver", "non", "no"].includes(
+      normalized
+    )
+  ) {
+    return { action: "off" };
   }
 
   return { action: "unknown" };
@@ -828,6 +879,11 @@ function buildModelStatusLines({
     config,
     codexDefaults
   });
+  const reasoningState = resolveEffectiveReasoningState({
+    project,
+    config,
+    codexDefaults
+  });
 
   return [
     project ? `project: ${project.alias}` : "scope: global",
@@ -839,9 +895,8 @@ function buildModelStatusLines({
     project ? `project_model_override: ${formatModelSetting(modelState.projectOverride)}` : null,
     `relay_global_model: ${formatModelSetting(modelState.relayOverride)}`,
     `codex_default_model: ${formatModelSetting(modelState.codexDefault)}`,
-    modelState.codexDefaultReasoning
-      ? `codex_default_reasoning: ${modelState.codexDefaultReasoning}`
-      : null
+    `effective_reasoning: ${reasoningState.effectiveReasoning ?? "unknown"}`,
+    `effective_reasoning_source: ${reasoningState.sourceLabel}`
   ].filter(Boolean);
 }
 
@@ -867,6 +922,108 @@ function formatModelStatus({
       : null,
     "",
     "Commands: /model, /model gpt-5.4, /model reset, /model global gpt-5.4, /models"
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function resolveEffectiveReasoningState({
+  project = null,
+  config = {},
+  codexDefaults = null
+} = {}) {
+  const projectOverride = project?.modelReasoningEffort ?? null;
+  const relayOverride = config?.modelReasoningEffort ?? null;
+  const codexDefault = codexDefaults?.modelReasoningEffort ?? null;
+  const effectiveReasoning = projectOverride ?? relayOverride ?? codexDefault ?? null;
+  const source = projectOverride
+    ? "project"
+    : relayOverride
+      ? "relay"
+      : codexDefault
+        ? "codex"
+        : "builtin";
+
+  return {
+    projectOverride,
+    relayOverride,
+    codexDefault,
+    effectiveReasoning,
+    source,
+    sourceLabel: normalizeModelSourceLabel(source)
+  };
+}
+
+function buildReasoningStatusLines({
+  activeProjectAlias,
+  project = null,
+  config = {},
+  codexDefaults = null
+} = {}) {
+  const reasoningState = resolveEffectiveReasoningState({
+    project,
+    config,
+    codexDefaults
+  });
+
+  return [
+    project ? `project: ${project.alias}` : "scope: global",
+    project && activeProjectAlias && project.alias !== activeProjectAlias
+      ? `active_project: ${activeProjectAlias}`
+      : null,
+    `effective_reasoning: ${reasoningState.effectiveReasoning ?? "unknown"}`,
+    `effective_reasoning_source: ${reasoningState.sourceLabel}`,
+    project
+      ? `project_reasoning_override: ${formatReasoningEffortSetting(
+          reasoningState.projectOverride
+        )}`
+      : null,
+    `relay_global_reasoning: ${formatReasoningEffortSetting(reasoningState.relayOverride)}`,
+    `codex_default_reasoning: ${formatReasoningEffortSetting(reasoningState.codexDefault)}`
+  ].filter(Boolean);
+}
+
+function formatReasoningStatus({
+  activeProjectAlias,
+  project = null,
+  config = {},
+  codexDefaults = null,
+  prelude = null,
+  activeRun = null
+} = {}) {
+  return [
+    prelude,
+    "Codex reasoning effort",
+    ...buildReasoningStatusLines({
+      activeProjectAlias,
+      project,
+      config,
+      codexDefaults
+    }),
+    activeRun
+      ? "Busy note: the current run keeps its existing reasoning effort; the new value applies on the next turn."
+      : null,
+    "",
+    "Levels:",
+    ...reasoningEffortHelpList().map(
+      (entry) => `- ${entry.value} (${entry.label}): ${entry.description}`
+    ),
+    "",
+    "Commands: /reasoning, /reasoning xhigh, /reasoning reset, /reasoning global xhigh, /reasoning <project> high."
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function formatNextStepsStatus(config = {}, prelude = null) {
+  const enabled = config.replyNextStepsEnabled !== false;
+  return [
+    prelude,
+    "Normal reply next-steps guidance",
+    `next_steps: ${enabled ? "on" : "off"}`,
+    "scope: normal prompts only; /mission is excluded",
+    "",
+    "Commands: /nextsteps, /nextsteps on, /nextsteps off."
   ]
     .filter(Boolean)
     .join("\n");
@@ -1085,6 +1242,12 @@ export function parseIncomingCommand(text, captureAllDirectMessages) {
         return { type: "model", payload };
       case "models":
         return { type: "models", payload };
+      case "reasoning":
+        return { type: "reasoning", payload };
+      case "nextSteps":
+        return { type: "nextSteps", payload };
+      case "mission":
+        return { type: "mission", payload };
       case "context":
         return { type: "context", payload };
       case "compact":
@@ -1303,6 +1466,30 @@ function joinMessageSections(...sections) {
   return sections
     .filter((section) => typeof section === "string" && section.trim())
     .join("\n\n");
+}
+
+export function buildNextStepsPrompt(prompt) {
+  const source = String(prompt ?? "").trim();
+  if (!source) {
+    return "";
+  }
+
+  return [
+    source,
+    "",
+    "Response guidance for WhatsApp Relay:",
+    "- This is a normal WhatsApp-driven Codex prompt, not a /mission run.",
+    "- Reply in the same language as the user.",
+    "- Near the end of the final answer, include a short section for recommended next steps.",
+    "- Title that section naturally in the reply language, for example `Prochaines étapes` in French.",
+    "- Give 1-3 concrete next actions you recommend from your own judgment.",
+    "- Keep that section compact and actionable.",
+    "- Omit this section only when the user explicitly asks for exact output, a one-line answer, only code, only JSON, or no commentary."
+  ].join("\n");
+}
+
+function shouldAddNextStepsGuidance(config = {}, runMetadata = null) {
+  return config.replyNextStepsEnabled !== false && runMetadata?.type !== "mission";
 }
 
 export function requiresTextConfirmationForVoicePrompt(prompt) {
@@ -1960,6 +2147,346 @@ export function parseModelCommandPayload(payload, config) {
     scope: "project",
     projectAlias: null,
     model: tokens.join(" "),
+    ambiguousProjects: []
+  };
+}
+
+export function parseReasoningCommandPayload(payload, config) {
+  const tokens = splitPayloadTokens(payload);
+  if (!tokens.length) {
+    return {
+      action: "status",
+      scope: "project",
+      projectAlias: null,
+      reasoning: null,
+      ambiguousProjects: []
+    };
+  }
+
+  const first = tokens[0].toLowerCase();
+  const resolveProjectToken = (token) => {
+    const selection = resolveConfiguredProjectSelection(config, token);
+    if (selection.match) {
+      return {
+        projectAlias: selection.match.alias,
+        ambiguousProjects: []
+      };
+    }
+    if (selection.candidates.length) {
+      return {
+        projectAlias: null,
+        ambiguousProjectToken: token,
+        ambiguousProjects: selection.candidates
+      };
+    }
+    return {
+      projectAlias: null,
+      ambiguousProjects: []
+    };
+  };
+  const statusPayload = ({ scope = "project", projectAlias = null, extra = {} } = {}) => ({
+    action: "status",
+    scope,
+    projectAlias,
+    reasoning: null,
+    ambiguousProjects: [],
+    ...extra
+  });
+  const unknownProjectPayload = (projectToken) => ({
+    action: "unknownProject",
+    scope: "project",
+    projectAlias: null,
+    reasoning: null,
+    projectToken,
+    ambiguousProjects: []
+  });
+
+  if (first === "status") {
+    if (tokens.length === 1) {
+      return statusPayload();
+    }
+    if (tokens[1].toLowerCase() === "global") {
+      return statusPayload({ scope: "global" });
+    }
+    const projectResolution = resolveProjectToken(tokens[1]);
+    return projectResolution.projectAlias || projectResolution.ambiguousProjects.length
+      ? statusPayload({
+          extra: projectResolution
+        })
+      : unknownProjectPayload(tokens[1]);
+  }
+
+  if (first === "global") {
+    if (tokens.length === 1 || tokens[1].toLowerCase() === "status") {
+      return statusPayload({ scope: "global" });
+    }
+    if (isReasoningResetToken(tokens[1])) {
+      return {
+        action: "reset",
+        scope: "global",
+        projectAlias: null,
+        reasoning: null,
+        ambiguousProjects: []
+      };
+    }
+    return {
+      action: "set",
+      scope: "global",
+      projectAlias: null,
+      reasoning: normalizeReasoningEffort(tokens.slice(1).join(" ")),
+      rawReasoning: tokens.slice(1).join(" "),
+      ambiguousProjects: []
+    };
+  }
+
+  if (isReasoningResetToken(first)) {
+    if (tokens.length === 1) {
+      return {
+        action: "reset",
+        scope: "project",
+        projectAlias: null,
+        reasoning: null,
+        ambiguousProjects: []
+      };
+    }
+    if (tokens[1].toLowerCase() === "global") {
+      return {
+        action: "reset",
+        scope: "global",
+        projectAlias: null,
+        reasoning: null,
+        ambiguousProjects: []
+      };
+    }
+    const projectResolution = resolveProjectToken(tokens[1]);
+    return projectResolution.projectAlias || projectResolution.ambiguousProjects.length
+      ? {
+          action: "reset",
+          scope: "project",
+          reasoning: null,
+          ...projectResolution
+        }
+      : unknownProjectPayload(tokens[1]);
+  }
+
+  if (tokens.length === 1) {
+    const projectResolution = resolveProjectToken(tokens[0]);
+    if (projectResolution.projectAlias || projectResolution.ambiguousProjects.length) {
+      return statusPayload({
+        extra: projectResolution
+      });
+    }
+  }
+
+  if (tokens.length >= 2) {
+    const projectResolution = resolveProjectToken(tokens[0]);
+    if (projectResolution.projectAlias) {
+      const rawReasoning = tokens.slice(1).join(" ");
+      return {
+        action: isReasoningResetToken(tokens[1]) ? "reset" : "set",
+        scope: "project",
+        projectAlias: projectResolution.projectAlias,
+        reasoning: isReasoningResetToken(tokens[1])
+          ? null
+          : normalizeReasoningEffort(rawReasoning),
+        rawReasoning,
+        ambiguousProjects: []
+      };
+    }
+    if (projectResolution.ambiguousProjects.length) {
+      const rawReasoning = tokens.slice(1).join(" ");
+      return {
+        action: "set",
+        scope: "project",
+        projectAlias: null,
+        reasoning: normalizeReasoningEffort(rawReasoning),
+        rawReasoning,
+        ambiguousProjectToken: tokens[0],
+        ambiguousProjects: projectResolution.ambiguousProjects
+      };
+    }
+  }
+
+  return {
+    action: "set",
+    scope: "project",
+    projectAlias: null,
+    reasoning: normalizeReasoningEffort(tokens.join(" ")),
+    rawReasoning: tokens.join(" "),
+    ambiguousProjects: []
+  };
+}
+
+export function parseMissionCommandPayload(payload, config) {
+  const source = String(payload ?? "").trim();
+  const tokens = splitPayloadTokens(source);
+  if (!tokens.length) {
+    return {
+      action: "status",
+      projectAlias: null,
+      objective: "",
+      ambiguousProjects: []
+    };
+  }
+
+  const first = tokens[0].toLowerCase();
+  if (/^\d+$/u.test(first)) {
+    return {
+      action: "select",
+      projectAlias: null,
+      objective: "",
+      selectionIndex: Number(first),
+      ambiguousProjects: []
+    };
+  }
+  if (["choose", "select", "choice", "choix"].includes(first) && /^\d+$/u.test(tokens[1] ?? "")) {
+    return {
+      action: "select",
+      projectAlias: null,
+      objective: "",
+      selectionIndex: Number(tokens[1]),
+      ambiguousProjects: []
+    };
+  }
+  if (["cancel", "annuler", "abort"].includes(first)) {
+    return {
+      action: "cancel",
+      projectAlias: null,
+      objective: "",
+      ambiguousProjects: []
+    };
+  }
+  if (["new", "fresh", "nouveau", "nouvelle", "new-session", "nouvelle-session"].includes(first)) {
+    const offset = tokens[1]?.toLowerCase() === "session" ? 2 : 1;
+    const nestedSource = tokens.slice(offset).join(" ");
+    if (!nestedSource.trim()) {
+      return {
+        action: "start",
+        projectAlias: null,
+        objective: "",
+        forceNewThread: true,
+        ambiguousProjects: []
+      };
+    }
+    return {
+      ...parseMissionCommandPayload(nestedSource, config),
+      forceNewThread: true
+    };
+  }
+  if (["current", "here", "actuelle", "courante"].includes(first)) {
+    return {
+      ...parseMissionCommandPayload(tokens.slice(1).join(" "), config),
+      branchMode: "current"
+    };
+  }
+  if (["new-branch", "newbranch", "nouvelle-branche", "nouvellebranche"].includes(first)) {
+    return {
+      ...parseMissionCommandPayload(tokens.slice(1).join(" "), config),
+      branchMode: "new"
+    };
+  }
+
+  const parseTargetProject = (token) => {
+    const selection = resolveConfiguredProjectSelection(config, token);
+    if (selection.match) {
+      return {
+        projectAlias: selection.match.alias,
+        ambiguousProjects: []
+      };
+    }
+    if (selection.candidates.length) {
+      return {
+        projectAlias: null,
+        ambiguousProjectToken: token,
+        ambiguousProjects: selection.candidates
+      };
+    }
+    return {
+      projectAlias: null,
+      ambiguousProjects: []
+    };
+  };
+
+  if (["status", "report"].includes(first)) {
+    if (tokens.length === 1) {
+      return {
+        action: first,
+        projectAlias: null,
+        objective: "",
+        ambiguousProjects: []
+      };
+    }
+    const target = parseTargetProject(tokens[1]);
+    return target.projectAlias || target.ambiguousProjects.length
+      ? {
+          action: first,
+          objective: "",
+          ...target
+        }
+      : {
+          action: "unknownProject",
+          projectAlias: null,
+          objective: "",
+          projectToken: tokens[1],
+          ambiguousProjects: []
+        };
+  }
+
+  if (first === "stop") {
+    if (tokens.length === 1) {
+      return {
+        action: "stop",
+        projectAlias: null,
+        objective: "",
+        ambiguousProjects: []
+      };
+    }
+    const target = parseTargetProject(tokens[1]);
+    return target.projectAlias || target.ambiguousProjects.length
+      ? {
+          action: "stop",
+          objective: "",
+          ...target
+        }
+      : {
+          action: "unknownProject",
+          projectAlias: null,
+          objective: "",
+          projectToken: tokens[1],
+          ambiguousProjects: []
+        };
+  }
+
+  const target = parseTargetProject(tokens[0]);
+  if (target.projectAlias && tokens.length === 1) {
+    return {
+      action: "status",
+      objective: "",
+      ...target
+    };
+  }
+  if (target.projectAlias) {
+    return {
+      action: "start",
+      projectAlias: target.projectAlias,
+      objective: tokens.slice(1).join(" "),
+      ambiguousProjects: []
+    };
+  }
+  if (target.ambiguousProjects.length) {
+    return {
+      action: "start",
+      projectAlias: null,
+      objective: tokens.slice(1).join(" "),
+      ambiguousProjectToken: tokens[0],
+      ambiguousProjects: target.ambiguousProjects
+    };
+  }
+
+  return {
+    action: "start",
+    projectAlias: null,
+    objective: source,
     ambiguousProjects: []
   };
 }
@@ -2954,6 +3481,27 @@ export class WhatsAppControllerBridge {
           payload: command.payload
         });
         return;
+      case "reasoning":
+        await this.handleReasoningCommand({
+          phoneKey,
+          remoteJid,
+          payload: command.payload
+        });
+        return;
+      case "nextSteps":
+        await this.handleNextStepsCommand({
+          remoteJid,
+          payload: command.payload
+        });
+        return;
+      case "mission":
+        await this.handleMissionCommand({
+          phoneKey,
+          remoteJid,
+          payload: command.payload,
+          label
+        });
+        return;
       case "context":
         await this.sendContextStatus(phoneKey, remoteJid, command.payload);
         return;
@@ -3428,7 +3976,7 @@ export class WhatsAppControllerBridge {
       projectSession.lastPromptAt ? `last_prompt_at: ${projectSession.lastPromptAt}` : null,
       projectSession.lastReplyAt ? `last_reply_at: ${projectSession.lastReplyAt}` : null,
       "",
-      "Commands: /project, /model, /models, /ctx, /compact, /autocompact, /in, /btw, /n, /ls, /session, /p, /ro, /ww, /dfa, /voice, /x, /h"
+      "Commands: /project, /mission, /model, /models, /reasoning, /ctx, /compact, /autocompact, /in, /btw, /n, /ls, /session, /p, /ro, /ww, /dfa, /voice, /x, /h"
     ]
       .filter(Boolean)
       .join("\n");
@@ -3792,6 +4340,178 @@ export class WhatsAppControllerBridge {
     );
   }
 
+  async handleReasoningCommand({ phoneKey, remoteJid, payload = "" }) {
+    const config = this.configStore.data;
+    const activeProject = this.getActiveProject(phoneKey);
+    const parsed = parseReasoningCommandPayload(payload, config);
+    if (parsed.ambiguousProjects?.length) {
+      await this.sendReply(
+        remoteJid,
+        renderAmbiguousProjectSelectionMessage(
+          parsed.ambiguousProjectToken,
+          parsed.ambiguousProjects
+        )
+      );
+      return;
+    }
+
+    if (parsed.action === "unknownProject") {
+      await this.sendReply(
+        remoteJid,
+        `Unknown project "${parsed.projectToken}". Use /projects to inspect available aliases.`
+      );
+      return;
+    }
+
+    const codexDefaults = await this.refreshCodexDefaults().catch(
+      () => this.codexDefaults ?? null
+    );
+    const project =
+      parsed.scope === "project"
+        ? resolveConfiguredProject(config, parsed.projectAlias ?? activeProject.alias)
+        : null;
+
+    if (parsed.action === "status") {
+      await this.sendReply(
+        remoteJid,
+        formatReasoningStatus({
+          activeProjectAlias: activeProject.alias,
+          project,
+          config,
+          codexDefaults
+        })
+      );
+      return;
+    }
+
+    if (parsed.action === "reset") {
+      if (parsed.scope === "global") {
+        const updated = await this.configStore.update({
+          modelReasoningEffort: null
+        });
+        await this.sendReply(
+          remoteJid,
+          formatReasoningStatus({
+            activeProjectAlias: activeProject.alias,
+            project: null,
+            config: updated,
+            codexDefaults,
+            prelude: "Relay global reasoning override cleared."
+          })
+        );
+        return;
+      }
+
+      const activeRun = this.projectRun(phoneKey, project.alias);
+      const updated = await this.configStore.mutate((data) => {
+        const index = data.projects.findIndex(
+          (entry) => normalizeProjectAlias(entry.alias) === project.alias
+        );
+        if (index >= 0) {
+          data.projects[index].modelReasoningEffort = null;
+        }
+      });
+      await this.sendReply(
+        remoteJid,
+        formatReasoningStatus({
+          activeProjectAlias: activeProject.alias,
+          project: resolveConfiguredProject(updated, project.alias),
+          config: updated,
+          codexDefaults,
+          prelude: `Reasoning override cleared for project ${project.alias}.`,
+          activeRun
+        })
+      );
+      return;
+    }
+
+    const requestedReasoning = normalizeReasoningEffort(parsed.reasoning);
+    if (!requestedReasoning) {
+      await this.sendReply(
+        remoteJid,
+        [
+          `Unknown reasoning effort "${String(parsed.rawReasoning ?? payload).trim()}".`,
+          "Use low|medium|high|xhigh, or French aliases like bas|moyen|eleve|tres approfondi.",
+          "Usage: /reasoning, /reasoning xhigh, /reasoning reset, /reasoning <project> high, /reasoning global xhigh."
+        ].join("\n")
+      );
+      return;
+    }
+
+    if (parsed.scope === "global") {
+      const updated = await this.configStore.update({
+        modelReasoningEffort: requestedReasoning
+      });
+      await this.sendReply(
+        remoteJid,
+        formatReasoningStatus({
+          activeProjectAlias: activeProject.alias,
+          project: null,
+          config: updated,
+          codexDefaults,
+          prelude: `Relay global reasoning effort is now ${requestedReasoning}.`
+        })
+      );
+      return;
+    }
+
+    const activeRun = this.projectRun(phoneKey, project.alias);
+    const updated = await this.configStore.mutate((data) => {
+      const index = data.projects.findIndex(
+        (entry) => normalizeProjectAlias(entry.alias) === project.alias
+      );
+      if (index >= 0) {
+        data.projects[index].modelReasoningEffort = requestedReasoning;
+      }
+    });
+    await this.sendReply(
+      remoteJid,
+      formatReasoningStatus({
+        activeProjectAlias: activeProject.alias,
+        project: resolveConfiguredProject(updated, project.alias),
+        config: updated,
+        codexDefaults,
+        prelude: `Reasoning for project ${project.alias} is now ${requestedReasoning}.`,
+        activeRun
+      })
+    );
+  }
+
+  async handleNextStepsCommand({ remoteJid, payload = "" }) {
+    const parsed = parseNextStepsCommandPayload(payload);
+
+    if (parsed.action === "status") {
+      await this.sendReply(remoteJid, formatNextStepsStatus(this.configStore.data));
+      return;
+    }
+
+    if (parsed.action === "unknown") {
+      await this.sendReply(
+        remoteJid,
+        [
+          `Unknown next-steps setting "${String(payload ?? "").trim()}".`,
+          "Usage: /nextsteps, /nextsteps on, /nextsteps off."
+        ].join("\n")
+      );
+      return;
+    }
+
+    const enabled = parsed.action === "on";
+    const updated = await this.configStore.update({
+      replyNextStepsEnabled: enabled
+    });
+
+    await this.sendReply(
+      remoteJid,
+      formatNextStepsStatus(
+        updated,
+        enabled
+          ? "Normal replies will now include recommended next steps."
+          : "Normal replies will no longer force recommended next steps."
+      )
+    );
+  }
+
   async handleModelsCommand({ phoneKey, remoteJid, payload = "" }) {
     const config = this.configStore.data;
     const activeProject = this.getActiveProject(phoneKey);
@@ -3866,6 +4586,384 @@ export class WhatsAppControllerBridge {
     );
   }
 
+  renderMissionBranchChoices(pendingMission = {}) {
+    const choices = Array.isArray(pendingMission.choices)
+      ? pendingMission.choices
+      : [];
+    const formatChoice = (choice) => {
+      const modeLabel =
+        choice.mode === "current"
+          ? "current"
+          : choice.mode === "new"
+            ? "new branch"
+            : "existing branch";
+      const updated = choice.updated ? ` (${choice.updated})` : "";
+      return `${choice.index}. ${modeLabel}: ${choice.branchName}${updated}`;
+    };
+
+    return [
+      `Mission ready for ${pendingMission.projectAlias}.`,
+      `objective: ${pendingMission.objective}`,
+      `thread: ${pendingMission.forceNewThread ? "fresh Codex thread" : "continue current Codex thread"}`,
+      pendingMission.currentBranch
+        ? `current_branch: ${pendingMission.currentBranch}`
+        : null,
+      pendingMission.dirtyCount
+        ? `note: ${pendingMission.dirtyCount} working-tree change(s) are currently present.`
+        : null,
+      "",
+      "Choose the branch strategy:",
+      ...choices.map((choice) => formatChoice(choice)),
+      "",
+      "Reply with /mission 1, /mission 2, ... to start, or /mission cancel to abort."
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  renderMissionStatus(phoneKey, projectAlias = null) {
+    const config = this.configStore.data;
+    const activeProject = this.getActiveProject(phoneKey);
+    const project = resolveConfiguredProject(config, projectAlias ?? activeProject.alias);
+    const { session } = this.getProjectSession(phoneKey, project.alias);
+    const activeRun = this.projectRun(phoneKey, project.alias);
+    const metadata = activeRun?.runMetadata ?? null;
+    const pendingMission = session.pendingMission ?? null;
+
+    return [
+      "ERP mission status",
+      `active_project: ${activeProject.alias}`,
+      `project: ${project.alias}`,
+      `busy: ${activeRun ? "yes" : "no"}`,
+      !activeRun && pendingMission ? `pending_mission: yes` : null,
+      !activeRun && pendingMission ? `pending_objective: ${pendingMission.objective}` : null,
+      metadata?.type === "mission" ? `mission_branch: ${metadata.branchName}` : null,
+      metadata?.type === "mission" ? `previous_branch: ${metadata.previousBranch}` : null,
+      metadata?.type === "mission" ? `branch_mode: ${metadata.branchMode}` : null,
+      metadata?.type === "mission" ? `objective: ${metadata.objective}` : null,
+      activeRun ? `run_status: ${activeRun.status ?? "running"}` : null,
+      metadata?.type === "mission"
+        ? `thread_mode: ${metadata.forceNewThread ? "fresh" : "continued"}`
+        : null,
+      metadata?.type === "mission" && metadata.continuedThreadId
+        ? `continued_thread: ${metadata.continuedThreadId}`
+        : null,
+      activeRun?.progressPreview ? `run_preview: ${activeRun.progressPreview}` : null,
+      !activeRun && session.lastReplyAt ? `last_reply_at: ${session.lastReplyAt}` : null,
+      !activeRun && session.lastErrorAt ? `last_error_at: ${session.lastErrorAt}` : null,
+      !activeRun && session.lastError ? `last_error: ${session.lastError}` : null,
+      !activeRun && pendingMission
+        ? `pending_choices: ${(pendingMission.choices ?? [])
+            ?.map((choice) => `${choice.index}:${choice.branchName}`)
+            .join(", ")}`
+        : null,
+      "",
+      activeRun
+        ? "Use /mission stop to stop this mission."
+        : pendingMission
+          ? "Use /mission <number> to start with one of the pending branch choices, or /mission cancel."
+          : "Use /mission <objective> to prepare branch choices, /mission current <objective> to start on the current branch, or /mission new-branch <objective> to create a branch immediately."
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  async prepareMissionBranchSelection({
+    phoneKey,
+    remoteJid,
+    label,
+    project,
+    objective,
+    forceNewThread
+  }) {
+    let branchPlan;
+    try {
+      branchPlan = await listMissionBranchChoices({
+        workspace: project.workspace,
+        projectAlias: project.alias,
+        objective
+      });
+    } catch (error) {
+      await this.sendReply(
+        remoteJid,
+        [
+          `Could not inspect Git branches for ${project.alias}.`,
+          error?.message ?? String(error)
+        ].join("\n")
+      );
+      return;
+    }
+
+    const pendingMission = {
+      type: "mission",
+      projectAlias: project.alias,
+      objective,
+      forceNewThread,
+      currentBranch: branchPlan.currentBranch,
+      dirtyCount: branchPlan.dirtyCount,
+      choices: branchPlan.choices,
+      createdAt: new Date().toISOString()
+    };
+    await this.upsertProjectSession(phoneKey, project.alias, {
+      chatPatch: {
+        phoneKey,
+        remoteJid,
+        label,
+        activeProject: project.alias
+      },
+      projectPatch: {
+        pendingMission
+      }
+    });
+    await this.sendReply(remoteJid, this.renderMissionBranchChoices(pendingMission));
+  }
+
+  async startMissionRun({
+    phoneKey,
+    remoteJid,
+    label,
+    project,
+    objective,
+    forceNewThread,
+    branchChoice
+  }) {
+    const activeRun = this.projectRun(phoneKey, project.alias);
+    if (activeRun) {
+      await this.sendReply(
+        remoteJid,
+        `Codex is already working in project ${project.alias}. Send /mission status ${project.alias} or /mission stop ${project.alias}.`
+      );
+      return;
+    }
+
+    const { session: projectSessionBeforeRun } = this.getProjectSession(
+      phoneKey,
+      project.alias
+    );
+    const continuedThreadId = !forceNewThread
+      ? projectSessionBeforeRun.threadId ?? null
+      : null;
+
+    let branch;
+    try {
+      branch = await prepareMissionBranch({
+        workspace: project.workspace,
+        projectAlias: project.alias,
+        objective,
+        branchMode: branchChoice?.mode ?? "new",
+        branchName: branchChoice?.branchName ?? null
+      });
+    } catch (error) {
+      await this.sendReply(
+        remoteJid,
+        [
+          `Could not prepare a mission branch for ${project.alias}.`,
+          error?.message ?? String(error)
+        ].join("\n")
+      );
+      return;
+    }
+
+    await this.upsertProjectSession(phoneKey, project.alias, {
+      chatPatch: {
+        phoneKey,
+        remoteJid,
+        label,
+        activeProject: project.alias
+      },
+      projectPatch: {
+        pendingMission: null
+      }
+    });
+
+    const prompt = buildMissionPrompt({
+      projectAlias: project.alias,
+      workspace: project.workspace,
+      objective,
+      branchName: branch.branchName,
+      previousBranch: branch.previousBranch,
+      dirtyCount: branch.dirtyCount,
+      branchMode: branch.branchMode,
+      continuesExistingThread: Boolean(continuedThreadId)
+    });
+    const statusPrelude = joinMessageSections(
+      [
+        `Mission started for ${project.alias}.`,
+        `branch: ${branch.branchName}`,
+        `branch_mode: ${branch.branchMode}`,
+        `from: ${branch.previousBranch}`,
+        forceNewThread
+          ? "thread: fresh Codex thread"
+          : continuedThreadId
+            ? `thread: continuing current Codex thread ${continuedThreadId.slice(0, 8)}`
+            : "thread: no existing project thread, starting a new one",
+        branch.dirtyCount
+          ? `note: ${branch.dirtyCount} existing working-tree change(s) were carried into the mission branch.`
+          : null
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      "I will use $erp-mission-team and post the result here when it completes."
+    );
+
+    await this.runPrompt({
+      phoneKey,
+      remoteJid,
+      prompt,
+      forceNewThread,
+      label,
+      scopeType: "project",
+      projectAlias: project.alias,
+      voiceReplyOverride: null,
+      statusPrelude,
+      runMetadata: {
+        type: "mission",
+        branchName: branch.branchName,
+        branchMode: branch.branchMode,
+        previousBranch: branch.previousBranch,
+        objective,
+        forceNewThread,
+        continuedThreadId
+      }
+    });
+  }
+
+  async handleMissionCommand({ phoneKey, remoteJid, payload = "", label }) {
+    const config = this.configStore.data;
+    const activeProject = this.getActiveProject(phoneKey);
+    const parsed = parseMissionCommandPayload(payload, config);
+
+    if (parsed.ambiguousProjects?.length) {
+      await this.sendReply(
+        remoteJid,
+        renderAmbiguousProjectSelectionMessage(
+          parsed.ambiguousProjectToken,
+          parsed.ambiguousProjects
+        )
+      );
+      return;
+    }
+
+    if (parsed.action === "unknownProject") {
+      await this.sendReply(
+        remoteJid,
+        `Unknown project "${parsed.projectToken}". Use /projects to inspect available aliases.`
+      );
+      return;
+    }
+
+    if (parsed.action === "select") {
+      const { session } = this.getProjectSession(phoneKey, activeProject.alias);
+      const pendingMission = session.pendingMission ?? null;
+      if (!pendingMission) {
+        await this.sendReply(
+          remoteJid,
+          "No pending mission branch choice. Start with /mission <objective> first."
+        );
+        return;
+      }
+      const branchChoice = pendingMission.choices?.find(
+        (choice) => choice.index === parsed.selectionIndex
+      );
+      if (!branchChoice) {
+        await this.sendReply(
+          remoteJid,
+          joinMessageSections(
+            `Unknown mission choice ${parsed.selectionIndex}.`,
+            this.renderMissionBranchChoices(pendingMission)
+          )
+        );
+        return;
+      }
+      const project = resolveConfiguredProject(config, pendingMission.projectAlias);
+      await this.startMissionRun({
+        phoneKey,
+        remoteJid,
+        label,
+        project,
+        objective: pendingMission.objective,
+        forceNewThread: Boolean(pendingMission.forceNewThread),
+        branchChoice
+      });
+      return;
+    }
+
+    if (parsed.action === "cancel") {
+      const { session } = this.getProjectSession(phoneKey, activeProject.alias);
+      if (!session.pendingMission) {
+        await this.sendReply(remoteJid, "No pending mission to cancel.");
+        return;
+      }
+      await this.upsertProjectSession(phoneKey, activeProject.alias, {
+        projectPatch: {
+          pendingMission: null
+        }
+      });
+      await this.sendReply(remoteJid, `Pending mission cancelled for ${activeProject.alias}.`);
+      return;
+    }
+
+    const project = resolveConfiguredProject(
+      config,
+      parsed.projectAlias ?? activeProject.alias
+    );
+
+    if (parsed.action === "status" || parsed.action === "report") {
+      await this.sendReply(remoteJid, this.renderMissionStatus(phoneKey, project.alias));
+      return;
+    }
+
+    if (parsed.action === "stop") {
+      await this.stopActiveRun(phoneKey, remoteJid, project.alias);
+      return;
+    }
+
+    const objective = String(parsed.objective ?? "").trim();
+    if (!objective) {
+      await this.sendReply(
+        remoteJid,
+        [
+          "Usage:",
+          "/mission <objective>",
+          "/mission <project> <objective>",
+          "/mission <number>",
+          "/mission current [project] <objective>",
+          "/mission new-branch [project] <objective>",
+          "/mission fresh [project] <objective>",
+          "/mission status [project]",
+          "/mission cancel",
+          "/mission stop [project]"
+        ].join("\n")
+      );
+      return;
+    }
+
+    const forceNewThread = Boolean(parsed.forceNewThread);
+    if (!parsed.branchMode) {
+      await this.prepareMissionBranchSelection({
+        phoneKey,
+        remoteJid,
+        label,
+        project,
+        objective,
+        forceNewThread
+      });
+      return;
+    }
+
+    await this.startMissionRun({
+      phoneKey,
+      remoteJid,
+      label,
+      project,
+      objective,
+      forceNewThread,
+      branchChoice: {
+        mode: parsed.branchMode
+      }
+    });
+  }
+
   async compactProjectSession({ phoneKey, project, projectSession }) {
     const config = this.configStore.data;
     const result = await compactCodexThread({
@@ -3873,6 +4971,7 @@ export class WhatsAppControllerBridge {
       workspace: project.workspace,
       threadId: projectSession.threadId,
       model: project.model ?? config.model,
+      modelReasoningEffort: project.modelReasoningEffort ?? config.modelReasoningEffort,
       profile: project.profile ?? config.profile,
       search: project.search ?? config.search
     });
@@ -4642,7 +5741,8 @@ export class WhatsAppControllerBridge {
     scopeType = "project",
     projectAlias = null,
     voiceReplyOverride = null,
-    statusPrelude = null
+    statusPrelude = null,
+    runMetadata = null
   }) {
     const config = this.configStore.data;
     const chatSession = this.getChatSession(phoneKey);
@@ -4705,9 +5805,12 @@ export class WhatsAppControllerBridge {
             )
           }
         : sessionVoiceReply;
-    const promptForCodex = activeVoiceReply.enabled
-      ? buildVoiceReplyPrompt(prompt)
+    const promptWithReplyGuidance = shouldAddNextStepsGuidance(config, runMetadata)
+      ? buildNextStepsPrompt(prompt)
       : prompt;
+    const promptForCodex = activeVoiceReply.enabled
+      ? buildVoiceReplyPrompt(promptWithReplyGuidance)
+      : promptWithReplyGuidance;
     const { child, interrupt, answerApproval, resultPromise } = startCodexTurn({
       codexBin: config.codexBin,
       workspace: project.workspace,
@@ -4722,6 +5825,7 @@ export class WhatsAppControllerBridge {
             scopeType
           }),
       model: project.model ?? config.model,
+      modelReasoningEffort: project.modelReasoningEffort ?? config.modelReasoningEffort,
       profile: project.profile ?? config.profile,
       search: project.search ?? config.search,
       permissionLevel,
@@ -4799,7 +5903,8 @@ export class WhatsAppControllerBridge {
       lastCompactedAt: projectSession.lastCompactedAt ?? null,
       voiceReply: cloneVoiceReplySetting(activeVoiceReply),
       scopeType,
-      projectAlias: scopeType === "project" ? project.alias : null
+      projectAlias: scopeType === "project" ? project.alias : null,
+      runMetadata
     };
     this.activeRuns.set(runKey, activeRun);
     const activeProjectAtDispatch = this.getActiveProject(phoneKey);

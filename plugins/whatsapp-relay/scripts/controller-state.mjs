@@ -113,6 +113,7 @@ export function defaultProjectSession() {
     lastAutoCompactAt: null,
     lastAutoCompactTokenUsageAt: null,
     lastAutoCompactPercent: null,
+    pendingMission: null,
     lastErrorAt: null,
     lastError: null,
     queuedPrompts: []

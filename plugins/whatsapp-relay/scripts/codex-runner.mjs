@@ -10,6 +10,7 @@ import {
   permissionLevelConfig,
   resolvePermissionLevel
 } from "./controller-permissions.mjs";
+import { normalizeReasoningEffort } from "./controller-reasoning.mjs";
 
 const CLIENT_INFO = {
   name: "whatsapp-relay",
@@ -94,9 +95,10 @@ const PROJECT_INTENT_SCHEMA = {
   }
 };
 
-function configArgs({ model, profile, search, permissionLevel }) {
+function configArgs({ model, modelReasoningEffort, profile, search, permissionLevel }) {
   const args = ["app-server"];
   const cliPermissions = cliPermissionOverrides(permissionLevel);
+  const reasoningEffort = normalizeReasoningEffort(modelReasoningEffort);
 
   if (profile) {
     args.push("-c", `profile=${JSON.stringify(profile)}`);
@@ -104,6 +106,10 @@ function configArgs({ model, profile, search, permissionLevel }) {
 
   if (model) {
     args.push("-c", `model=${JSON.stringify(model)}`);
+  }
+
+  if (reasoningEffort) {
+    args.push("-c", `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`);
   }
 
   if (search) {
@@ -794,6 +800,7 @@ function startAppServerClient({
   codexBin,
   workspace,
   model = null,
+  modelReasoningEffort = null,
   profile = null,
   search = false,
   permissionLevel = "read-only",
@@ -806,6 +813,7 @@ function startAppServerClient({
     codexBin,
     configArgs({
       model,
+      modelReasoningEffort,
       profile,
       search,
       permissionLevel: resolvedPermissionLevel
@@ -1335,6 +1343,7 @@ export function startCodexTurn({
   threadId = null,
   threadName = null,
   model = null,
+  modelReasoningEffort = null,
   profile = null,
   search = false,
   permissionLevel = "workspace-write",
@@ -1352,6 +1361,7 @@ export function startCodexTurn({
     codexBin,
     workspace,
     model,
+    modelReasoningEffort,
     profile,
     search,
     permissionLevel: resolvedPermissionLevel,
