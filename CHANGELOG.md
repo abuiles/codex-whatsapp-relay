@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 - Optional Kokoro ONNX outbound voice-reply provider for local neural TTS.
 - Context monitoring commands, including `/ctx`, `/compact`, and `/autocompact`.
 - Windows voice setup documentation for `ffmpeg`, `whisper.cpp`, GGML Whisper models, SAPI, and Kokoro ONNX.
+- WhatsApp image forwarding for controller prompts, including local uploads and Codex `localImage` inputs.
 
 ### Changed
 
@@ -21,6 +22,7 @@ All notable changes to this project will be documented in this file.
 
 - Windows `.cmd` and `.bat` Codex shims are spawned through a shell so local controller runs work with npm-installed Codex binaries.
 - `npm run check` and `npm test` now use portable Node scripts instead of shell globs.
+- WhatsApp album markers are no longer forwarded to Codex as `[albumMessage]` placeholder prompts.
 
 ### Security
 

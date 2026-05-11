@@ -18,6 +18,7 @@ The controller bridge is now project-aware. One chat can keep `api` busy, switch
 - jump between saved Codex sessions inside one project
 - approve, deny, stop, or lower permissions from WhatsApp
 - talk to Codex with voice notes and get local voice-note replies back
+- send WhatsApp images or photo albums into the active Codex project thread
 - resume the same work later in your terminal with `codex resume`
 
 ## Install In Codex
@@ -122,6 +123,7 @@ Once the controller bridge is running, allowed direct chats can send:
 
 - plain text to continue the active project's current Codex session
 - voice notes to continue the active project's current Codex session after local transcription
+- images and photo albums to continue the active project with Codex `localImage` inputs
 
 Project control:
 
@@ -310,6 +312,7 @@ voice note
 - Only one controller bridge should own the live WhatsApp session at a time. Starting a second checkout now refuses instead of silently replacing the current bridge.
 - Auth material under `plugins/whatsapp-relay/data/auth*` is local runtime state and should never be committed.
 - Runtime controller state, local chat stores, logs, generated audio, downloaded models, and local toolchains should stay out of git.
+- Downloaded WhatsApp image uploads are stored under `plugins/whatsapp-relay/data/uploads/` and should stay local.
 - Typed slash commands remain the most reliable way to change sessions or permissions. Voice notes work best for natural prompts and short spoken commands like `help`, `status`, `stop`, and `new session`.
 
 ## Context Monitoring

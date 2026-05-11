@@ -44,7 +44,13 @@ import {
   listMissionBranchChoices,
   prepareMissionBranch
 } from "./mission-control.mjs";
-import { extractAudioMessage, extractMessageText, extractMessageType } from "./store.mjs";
+import {
+  extractAlbumMessage,
+  extractAudioMessage,
+  extractImageMessage,
+  extractMessageText,
+  extractMessageType
+} from "./store.mjs";
 import {
   DEFAULT_TRANSCRIPTION_MODEL,
   DEFAULT_TRANSCRIPTION_PROVIDER,
@@ -75,6 +81,9 @@ const FENCED_CODE_BLOCK_PATTERN = /```(?:[\w-]+)?\n?([\s\S]*?)```/g;
 const ACTIONABLE_URL_PATTERN = /https?:\/\/\S+/i;
 const DEFAULT_CONTEXT_ALERT_THRESHOLD_PERCENT = 75;
 const DEFAULT_CONTEXT_AUTO_COMPACT_THRESHOLD_PERCENT = 80;
+const INBOUND_MEDIA_BATCH_IDLE_MS = 1_800;
+const INBOUND_ALBUM_EMPTY_TIMEOUT_MS = 5_000;
+const MAX_INBOUND_IMAGES_PER_PROMPT = 10;
 
 function invalidControllerCommandError(message) {
   const error = new Error(message);
@@ -1142,6 +1151,60 @@ function shouldIgnoreInboundSystemMessage(messageType) {
   return new Set([
     "protocolMessage"
   ]).has(String(messageType ?? "").trim());
+}
+
+function normalizePositiveInteger(value) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function imageCaption(imageMessage) {
+  return typeof imageMessage?.caption === "string" ? imageMessage.caption.trim() : "";
+}
+
+function normalizeMediaAttachments(value) {
+  return Array.isArray(value)
+    ? value
+        .map((item) => {
+          if (item?.type !== "localImage" || typeof item.path !== "string") {
+            return null;
+          }
+
+          const filePath = item.path.trim();
+          return filePath ? { type: "localImage", path: filePath } : null;
+        })
+        .filter(Boolean)
+    : [];
+}
+
+function buildInboundImagePrompt(captions, imageCount) {
+  const usableCaptions = [...new Set(
+    captions
+      .map((caption) => String(caption ?? "").trim())
+      .filter(Boolean)
+  )];
+  if (usableCaptions.length) {
+    return usableCaptions.join("\n\n");
+  }
+
+  return [
+    `Analyse les ${imageCount} image${imageCount > 1 ? "s" : ""} jointes depuis WhatsApp.`,
+    "Si la consigne n'est pas explicite, décris ce que tu observes et propose la prochaine action utile."
+  ].join("\n");
+}
+
+function shouldAttachPendingMediaToText(text) {
+  const trimmed = String(text ?? "").trim();
+  return Boolean(trimmed) && !trimmed.startsWith("/");
+}
+
+function formatInboundImagePrelude(imageCount, skippedCount = 0) {
+  return [
+    `Received ${imageCount} WhatsApp image${imageCount === 1 ? "" : "s"} for Codex.`,
+    skippedCount > 0
+      ? `Only the first ${MAX_INBOUND_IMAGES_PER_PROMPT} images were attached; ${skippedCount} extra image${skippedCount === 1 ? "" : "s"} were skipped.`
+      : null
+  ].filter(Boolean).join("\n");
 }
 
 function resolveStoredThreadShortcut(session = {}, token) {
@@ -2529,7 +2592,9 @@ export class WhatsAppControllerBridge {
   constructor({
     runtime,
     configStore = new ControllerConfigStore(),
-    stateStore = new ControllerStateStore()
+    stateStore = new ControllerStateStore(),
+    mediaBatchIdleMs = INBOUND_MEDIA_BATCH_IDLE_MS,
+    albumEmptyTimeoutMs = INBOUND_ALBUM_EMPTY_TIMEOUT_MS
   }) {
     this.runtime = runtime;
     this.configStore = configStore;
@@ -2548,6 +2613,9 @@ export class WhatsAppControllerBridge {
     this.loggedOutRecoveryPromise = null;
     this.unsubscribers = [];
     this.codexDefaults = null;
+    this.inboundMediaBatches = new Map();
+    this.mediaBatchIdleMs = mediaBatchIdleMs;
+    this.albumEmptyTimeoutMs = albumEmptyTimeoutMs;
   }
 
   async initialize() {
@@ -2684,7 +2752,8 @@ export class WhatsAppControllerBridge {
     projectAlias = null,
     prompt,
     forceNewThread = false,
-    voiceReplyOverride = null
+    voiceReplyOverride = null,
+    mediaAttachments = []
   }) {
     const trimmedPrompt = String(prompt ?? "").trim();
     if (!trimmedPrompt) {
@@ -2695,6 +2764,7 @@ export class WhatsAppControllerBridge {
       prompt: trimmedPrompt,
       forceNewThread,
       queuedAt: new Date().toISOString(),
+      mediaAttachments: normalizeMediaAttachments(mediaAttachments),
       voiceReplyOverride:
         voiceReplyOverride?.enabled
           ? {
@@ -2821,6 +2891,7 @@ export class WhatsAppControllerBridge {
     prompt,
     forceNewThread = false,
     voiceReplyOverride = null,
+    mediaAttachments = [],
     statusPrelude = null
   }) {
     const project = resolveConfiguredProject(
@@ -2843,7 +2914,8 @@ export class WhatsAppControllerBridge {
       projectAlias: project.alias,
       prompt,
       forceNewThread,
-      voiceReplyOverride
+      voiceReplyOverride,
+      mediaAttachments
     });
     await this.sendReply(
       remoteJid,
@@ -2889,6 +2961,7 @@ export class WhatsAppControllerBridge {
       scopeType,
       projectAlias: project.alias,
       voiceReplyOverride: queuedPrompt.voiceReplyOverride ?? null,
+      mediaAttachments: queuedPrompt.mediaAttachments ?? [],
       statusPrelude:
         scopeType === "btw"
           ? "Running your queued btw follow-up now."
@@ -3231,6 +3304,177 @@ export class WhatsAppControllerBridge {
     }
   }
 
+  getOrCreateInboundMediaBatch(phoneKey, seed = {}) {
+    const existing = this.inboundMediaBatches.get(phoneKey);
+    if (existing) {
+      return Object.assign(existing, {
+        remoteJid: seed.remoteJid ?? existing.remoteJid,
+        label: seed.label ?? existing.label,
+        activeProjectAlias: seed.activeProjectAlias ?? existing.activeProjectAlias
+      });
+    }
+
+    const batch = {
+      phoneKey,
+      remoteJid: seed.remoteJid ?? null,
+      label: seed.label ?? null,
+      activeProjectAlias: seed.activeProjectAlias ?? null,
+      captions: [],
+      items: [],
+      expectedImageCount: 0,
+      expectedVideoCount: 0,
+      timer: null,
+      createdAt: new Date().toISOString()
+    };
+    this.inboundMediaBatches.set(phoneKey, batch);
+    return batch;
+  }
+
+  scheduleInboundMediaBatchFlush(phoneKey, timeoutMs = this.mediaBatchIdleMs) {
+    const batch = this.inboundMediaBatches.get(phoneKey);
+    if (!batch) {
+      return;
+    }
+
+    if (batch.timer) {
+      clearTimeout(batch.timer);
+    }
+
+    batch.timer = setTimeout(() => {
+      this.flushInboundMediaBatch(phoneKey).catch((error) => {
+        this.runtime?.logger?.warn?.({ err: error }, "failed to flush inbound media batch");
+      });
+    }, timeoutMs);
+  }
+
+  async stageInboundAlbumMessage({
+    phoneKey,
+    remoteJid,
+    label,
+    activeProjectAlias,
+    albumMessage
+  }) {
+    const batch = this.getOrCreateInboundMediaBatch(phoneKey, {
+      remoteJid,
+      label,
+      activeProjectAlias
+    });
+    batch.expectedImageCount = Math.max(
+      batch.expectedImageCount,
+      normalizePositiveInteger(albumMessage?.expectedImageCount)
+    );
+    batch.expectedVideoCount = Math.max(
+      batch.expectedVideoCount,
+      normalizePositiveInteger(albumMessage?.expectedVideoCount)
+    );
+    this.scheduleInboundMediaBatchFlush(phoneKey, this.albumEmptyTimeoutMs);
+  }
+
+  async stageInboundImageMessage({
+    phoneKey,
+    remoteJid,
+    label,
+    activeProjectAlias,
+    message,
+    imageMessage,
+    messageId
+  }) {
+    const mimeType = imageMessage?.mimetype ?? "image/jpeg";
+    const mediaBuffer = await this.runtime.downloadMediaBuffer(message);
+    const filePath = await this.runtime.saveInboundMediaBuffer(mediaBuffer, {
+      phoneKey,
+      messageId,
+      mimeType,
+      kind: "image"
+    });
+
+    const batch = this.getOrCreateInboundMediaBatch(phoneKey, {
+      remoteJid,
+      label,
+      activeProjectAlias
+    });
+    const caption = imageCaption(imageMessage);
+    if (caption) {
+      batch.captions.push(caption);
+    }
+    batch.items.push({
+      type: "localImage",
+      path: filePath
+    });
+
+    const hasExpectedCount =
+      batch.expectedImageCount > 0 && batch.items.length >= batch.expectedImageCount;
+    this.scheduleInboundMediaBatchFlush(
+      phoneKey,
+      hasExpectedCount ? Math.min(this.mediaBatchIdleMs, 500) : this.mediaBatchIdleMs
+    );
+  }
+
+  async flushInboundMediaBatch(phoneKey, { promptOverride = null, statusPrelude = null } = {}) {
+    const batch = this.inboundMediaBatches.get(phoneKey);
+    if (!batch) {
+      return false;
+    }
+
+    if (batch.timer) {
+      clearTimeout(batch.timer);
+    }
+    this.inboundMediaBatches.delete(phoneKey);
+
+    if (!batch.items.length) {
+      await this.sendReply(
+        batch.remoteJid,
+        "I received a WhatsApp album marker, but no downloadable images arrived. Please resend the photos, preferably as images with a caption or one by one."
+      );
+      return false;
+    }
+
+    const allAttachments = normalizeMediaAttachments(batch.items);
+    const mediaAttachments = allAttachments.slice(0, MAX_INBOUND_IMAGES_PER_PROMPT);
+    const skippedCount = Math.max(0, allAttachments.length - mediaAttachments.length);
+    const prompt =
+      String(promptOverride ?? "").trim() ||
+      buildInboundImagePrompt(batch.captions, mediaAttachments.length);
+    const config = this.configStore.data;
+    const activeProject = resolveConfiguredProject(
+      config,
+      batch.activeProjectAlias ?? this.getActiveProject(phoneKey).alias
+    );
+    const prelude = joinMessageSections(
+      statusPrelude,
+      formatInboundImagePrelude(allAttachments.length, skippedCount)
+    );
+
+    if (
+      await this.queuePromptIfBusy({
+        phoneKey,
+        remoteJid: batch.remoteJid,
+        label: batch.label,
+        scopeType: "project",
+        projectAlias: activeProject.alias,
+        prompt,
+        forceNewThread: false,
+        mediaAttachments,
+        statusPrelude: prelude
+      })
+    ) {
+      return true;
+    }
+
+    await this.runPrompt({
+      phoneKey,
+      remoteJid: batch.remoteJid,
+      prompt,
+      forceNewThread: false,
+      label: batch.label,
+      scopeType: "project",
+      projectAlias: activeProject.alias,
+      mediaAttachments,
+      statusPrelude: prelude
+    });
+    return true;
+  }
+
   async handleMessagesUpsert(payload = {}) {
     if (payload.type && !["notify", "append"].includes(payload.type)) {
       return;
@@ -3290,8 +3534,10 @@ export class WhatsAppControllerBridge {
     }
 
     const audioMessage = extractAudioMessage(message.message);
+    const imageMessage = extractImageMessage(message.message);
+    const albumMessage = extractAlbumMessage(message.message);
     const extractedText = extractMessageText(message.message).trim();
-    let text = audioMessage ? "" : extractedText;
+    let text = audioMessage || imageMessage || albumMessage ? "" : extractedText;
     const chatSession = this.getChatSession(phoneKey);
     const activeProject = resolveConfiguredProject(
       config,
@@ -3307,12 +3553,65 @@ export class WhatsAppControllerBridge {
       lastInboundAt: new Date().toISOString(),
       lastInboundText:
         text ||
-        (audioMessage ? "[voice note]" : `[${message.key?.id ?? "message"}]`),
-      lastInboundType: audioMessage ? "voice" : messageType
+        (audioMessage
+          ? "[voice note]"
+          : imageMessage
+            ? imageCaption(imageMessage) || "[image]"
+            : albumMessage
+              ? "[album]"
+              : `[${message.key?.id ?? "message"}]`),
+      lastInboundType: audioMessage ? "voice" : imageMessage ? "image" : messageType
     });
 
     let command = null;
     let voiceTranscriptReply = null;
+
+    if (albumMessage && !imageMessage && !audioMessage) {
+      await this.stageInboundAlbumMessage({
+        phoneKey,
+        remoteJid,
+        label,
+        activeProjectAlias: activeProject.alias,
+        albumMessage
+      });
+      return;
+    }
+
+    if (imageMessage) {
+      try {
+        await this.stageInboundImageMessage({
+          phoneKey,
+          remoteJid,
+          label,
+          activeProjectAlias: activeProject.alias,
+          message,
+          imageMessage,
+          messageId
+        });
+      } catch (error) {
+        await this.upsertProjectSession(phoneKey, activeProject.alias, {
+          chatPatch: {
+            phoneKey,
+            remoteJid,
+            label
+          },
+          projectPatch: {
+            lastErrorAt: new Date().toISOString(),
+            lastError: `Image download failed: ${error.message}`
+          }
+        });
+        await this.sendReply(
+          remoteJid,
+          `Failed to download that WhatsApp image locally: ${error.message}`
+        );
+      }
+      return;
+    }
+
+    if (text && shouldAttachPendingMediaToText(text) && this.inboundMediaBatches.has(phoneKey)) {
+      await this.flushInboundMediaBatch(phoneKey, { promptOverride: text });
+      return;
+    }
 
     if (text) {
       command = parseIncomingCommand(text, config.captureAllDirectMessages);
@@ -5742,7 +6041,8 @@ export class WhatsAppControllerBridge {
     projectAlias = null,
     voiceReplyOverride = null,
     statusPrelude = null,
-    runMetadata = null
+    runMetadata = null,
+    mediaAttachments = []
   }) {
     const config = this.configStore.data;
     const chatSession = this.getChatSession(phoneKey);
@@ -5811,10 +6111,12 @@ export class WhatsAppControllerBridge {
     const promptForCodex = activeVoiceReply.enabled
       ? buildVoiceReplyPrompt(promptWithReplyGuidance)
       : promptWithReplyGuidance;
+    const inputItems = normalizeMediaAttachments(mediaAttachments);
     const { child, interrupt, answerApproval, resultPromise } = startCodexTurn({
       codexBin: config.codexBin,
       workspace: project.workspace,
       prompt: promptForCodex,
+      inputItems,
       threadId: existingThreadId,
       threadName: existingThreadId
         ? null
@@ -5921,6 +6223,7 @@ export class WhatsAppControllerBridge {
           pendingPermissionConfirmation: null,
           lastPromptAt: new Date().toISOString(),
           lastPromptText: prompt,
+          lastPromptMediaCount: inputItems.length,
           lastPromptVoiceReply: activeVoiceReply.enabled ? activeVoiceReply : null,
           threadId: existingThreadId
         }

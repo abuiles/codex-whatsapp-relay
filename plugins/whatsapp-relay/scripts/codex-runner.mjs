@@ -122,14 +122,41 @@ function configArgs({ model, modelReasoningEffort, profile, search, permissionLe
   return args;
 }
 
-function buildPromptInput(prompt) {
-  return [
+function normalizeTurnInputItem(item) {
+  if (item?.type === "localImage" && typeof item.path === "string" && item.path.trim()) {
+    return {
+      type: "localImage",
+      path: item.path.trim()
+    };
+  }
+
+  if (item?.type === "image" && typeof item.url === "string" && item.url.trim()) {
+    return {
+      type: "image",
+      url: item.url.trim()
+    };
+  }
+
+  return null;
+}
+
+export function buildPromptInput(prompt, inputItems = []) {
+  const input = [
     {
       type: "text",
       text: prompt,
       text_elements: []
     }
   ];
+
+  for (const item of inputItems) {
+    const normalized = normalizeTurnInputItem(item);
+    if (normalized) {
+      input.push(normalized);
+    }
+  }
+
+  return input;
 }
 
 function sanitizeIntentText(value) {
@@ -1340,6 +1367,7 @@ export function startCodexTurn({
   codexBin,
   workspace,
   prompt,
+  inputItems = [],
   threadId = null,
   threadName = null,
   model = null,
@@ -1587,7 +1615,7 @@ export function startCodexTurn({
 
     const turnResult = await client.request("turn/start", {
       threadId: resolvedThreadId,
-      input: buildPromptInput(prompt),
+      input: buildPromptInput(prompt, inputItems),
       cwd: workspace,
       ...(model ? { model } : {}),
       approvalPolicy: permissionParams.approvalPolicy,

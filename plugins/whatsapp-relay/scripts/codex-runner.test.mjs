@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  buildPromptInput,
   buildProjectIntentPrompt,
   buildVoiceCommandIntentPrompt,
   normalizeCodexTurnNotification,
@@ -10,6 +11,32 @@ import {
   normalizeProjectIntentSelection,
   normalizeVoiceCommandIntent
 } from "./codex-runner.mjs";
+
+test("buildPromptInput forwards local images to Codex app-server", () => {
+  assert.deepEqual(
+    buildPromptInput("analyse these", [
+      { type: "localImage", path: "C:\\tmp\\one.jpg" },
+      { type: "localImage", path: "  C:\\tmp\\two.png  " },
+      { type: "localImage", path: " " },
+      { type: "unsupported", path: "C:\\tmp\\ignored.jpg" }
+    ]),
+    [
+      {
+        type: "text",
+        text: "analyse these",
+        text_elements: []
+      },
+      {
+        type: "localImage",
+        path: "C:\\tmp\\one.jpg"
+      },
+      {
+        type: "localImage",
+        path: "C:\\tmp\\two.png"
+      }
+    ]
+  );
+});
 
 test("buildVoiceCommandIntentPrompt includes project context for Codex classification", () => {
   const prompt = buildVoiceCommandIntentPrompt({

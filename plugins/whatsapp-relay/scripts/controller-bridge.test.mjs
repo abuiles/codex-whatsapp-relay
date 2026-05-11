@@ -414,6 +414,156 @@ test("handleIncomingMessage ignores WhatsApp protocol messages", async () => {
   assert.equal(ranPrompt, false);
 });
 
+test("handleIncomingMessage downloads WhatsApp images and forwards them as local images", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "controller-bridge-image-test-"));
+  const filePath = path.join(tempDir, "controller-state.json");
+  const imagePath = path.join(tempDir, "image-one.jpg");
+
+  try {
+    await fs.writeFile(imagePath, "fake image");
+    const stateStore = new ControllerStateStore(filePath);
+    await stateStore.load();
+    const configData = {
+      enabled: true,
+      defaultProject: "alpha-app",
+      permissionLevel: "workspace-write",
+      captureAllDirectMessages: true,
+      projects: [
+        {
+          alias: "alpha-app",
+          workspace: tempDir
+        }
+      ]
+    };
+    const bridge = new WhatsAppControllerBridge({
+      runtime: {
+        async downloadMediaBuffer() {
+          return Buffer.from("fake image");
+        },
+        async saveInboundMediaBuffer() {
+          return imagePath;
+        }
+      },
+      configStore: {
+        data: configData,
+        async load() {
+          return this.data;
+        },
+        async findControllerByJid() {
+          return {
+            phoneKey: "123",
+            label: "self"
+          };
+        }
+      },
+      stateStore,
+      mediaBatchIdleMs: 5
+    });
+
+    const dispatched = [];
+    bridge.runPrompt = async (args) => {
+      dispatched.push(args);
+    };
+    bridge.sendReply = async () => {};
+
+    await bridge.handleIncomingMessage({
+      key: {
+        remoteJid: "123@s.whatsapp.net",
+        id: "img-1",
+        fromMe: false
+      },
+      messageTimestamp: Math.floor(Date.now() / 1000),
+      message: {
+        imageMessage: {
+          mimetype: "image/jpeg",
+          caption: "Analyse cette capture"
+        }
+      }
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    assert.equal(dispatched.length, 1);
+    assert.equal(dispatched[0].prompt, "Analyse cette capture");
+    assert.deepEqual(dispatched[0].mediaAttachments, [
+      {
+        type: "localImage",
+        path: imagePath
+      }
+    ]);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("handleIncomingMessage does not forward album markers as placeholder prompts", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "controller-bridge-album-test-"));
+  const filePath = path.join(tempDir, "controller-state.json");
+
+  try {
+    const stateStore = new ControllerStateStore(filePath);
+    await stateStore.load();
+    const configData = {
+      enabled: true,
+      defaultProject: "alpha-app",
+      permissionLevel: "workspace-write",
+      captureAllDirectMessages: true,
+      projects: [
+        {
+          alias: "alpha-app",
+          workspace: tempDir
+        }
+      ]
+    };
+    const bridge = new WhatsAppControllerBridge({
+      runtime: {},
+      configStore: {
+        data: configData,
+        async load() {
+          return this.data;
+        },
+        async findControllerByJid() {
+          return {
+            phoneKey: "123",
+            label: "self"
+          };
+        }
+      },
+      stateStore,
+      albumEmptyTimeoutMs: 5
+    });
+
+    const dispatched = [];
+    const replies = [];
+    bridge.runPrompt = async (args) => {
+      dispatched.push(args);
+    };
+    bridge.sendReply = async (_remoteJid, text) => {
+      replies.push(text);
+    };
+
+    await bridge.handleIncomingMessage({
+      key: {
+        remoteJid: "123@s.whatsapp.net",
+        id: "album-1",
+        fromMe: false
+      },
+      messageTimestamp: Math.floor(Date.now() / 1000),
+      message: {
+        albumMessage: {
+          expectedImageCount: 2
+        }
+      }
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    assert.equal(dispatched.length, 0);
+    assert.equal(replies.length, 1);
+    assert.match(replies[0], /album marker/i);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("parseApprovalTargetPayload keeps multi-word project targets intact", () => {
   assert.deepEqual(parseApprovalTargetPayload("alpha checkin session", "accept"), {
     decision: "acceptForSession",

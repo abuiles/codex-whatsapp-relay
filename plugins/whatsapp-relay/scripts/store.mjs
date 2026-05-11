@@ -130,6 +130,24 @@ export function extractAudioMessage(message) {
   return payload.audioMessage;
 }
 
+export function extractImageMessage(message) {
+  const payload = unwrapMessage(message);
+  if (!payload?.imageMessage) {
+    return null;
+  }
+
+  return payload.imageMessage;
+}
+
+export function extractAlbumMessage(message) {
+  const payload = unwrapMessage(message);
+  if (!payload?.albumMessage) {
+    return null;
+  }
+
+  return payload.albumMessage;
+}
+
 function preferredChatName(chat, contact) {
   return (
     chat.name ||

@@ -40,6 +40,7 @@ function normalizeQueuedPrompt(value = {}) {
     prompt,
     forceNewThread: Boolean(value.forceNewThread),
     queuedAt: typeof value.queuedAt === "string" ? value.queuedAt : null,
+    mediaAttachments: normalizeQueuedMediaAttachments(value.mediaAttachments),
     voiceReplyOverride:
       value.voiceReplyOverride?.enabled
         ? {
@@ -74,6 +75,21 @@ function normalizeTokenUsageBreakdown(value = {}) {
     outputTokens: normalizeFiniteNumber(value.outputTokens),
     reasoningOutputTokens: normalizeFiniteNumber(value.reasoningOutputTokens)
   };
+}
+
+function normalizeQueuedMediaAttachments(value) {
+  return Array.isArray(value)
+    ? value
+        .map((item) => {
+          if (item?.type !== "localImage" || typeof item.path !== "string") {
+            return null;
+          }
+
+          const path = item.path.trim();
+          return path ? { type: "localImage", path } : null;
+        })
+        .filter(Boolean)
+    : [];
 }
 
 function normalizeThreadTokenUsage(value) {

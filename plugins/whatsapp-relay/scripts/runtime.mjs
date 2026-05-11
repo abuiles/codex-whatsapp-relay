@@ -1,6 +1,8 @@
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
+import fs from "node:fs/promises";
 import { createRequire } from "node:module";
+import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { Boom } from "@hapi/boom";
@@ -13,13 +15,28 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import pino from "pino";
 
-import { authDir, credsFile, ensureRuntimeDirs, runtimeFile, storeFile } from "./paths.mjs";
+import {
+  authDir,
+  credsFile,
+  ensureRuntimeDirs,
+  mediaUploadsDir,
+  runtimeFile,
+  storeFile
+} from "./paths.mjs";
 import { WhatsAppStore } from "./store.mjs";
 
 const require = createRequire(import.meta.url);
 const QRCode = require("qrcode-terminal/vendor/QRCode");
 const QRErrorCorrectLevel = require("qrcode-terminal/vendor/QRCode/QRErrorCorrectLevel");
 const DEFAULT_FIXED_WA_VERSION = [2, 3000, 1033893291];
+const MEDIA_EXTENSION_BY_MIME = new Map([
+  ["image/jpeg", ".jpg"],
+  ["image/jpg", ".jpg"],
+  ["image/png", ".png"],
+  ["image/webp", ".webp"],
+  ["image/heic", ".heic"],
+  ["image/heif", ".heif"]
+]);
 
 const VERTICAL_BLOCKS = {
   "00": " ",
@@ -157,6 +174,20 @@ function payloadHasChat(payload, chatId) {
   }
 
   return (payload.messages ?? []).some((message) => message?.key?.remoteJid === chatId);
+}
+
+function safeFilePart(value, fallback = "item") {
+  const normalized = String(value ?? "")
+    .trim()
+    .replace(/[^a-z0-9._-]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  return normalized || fallback;
+}
+
+function extensionForMimeType(mimeType) {
+  const normalized = String(mimeType ?? "").split(";")[0].trim().toLowerCase();
+  return MEDIA_EXTENSION_BY_MIME.get(normalized) ?? ".bin";
 }
 
 export class WhatsAppRuntime {
@@ -394,6 +425,27 @@ export class WhatsAppRuntime {
       logger: this.logger,
       reuploadRequest: socket.updateMediaMessage
     });
+  }
+
+  async saveInboundMediaBuffer(buffer, {
+    phoneKey = "unknown",
+    messageId = null,
+    mimeType = "application/octet-stream",
+    kind = "media"
+  } = {}) {
+    await ensureRuntimeDirs();
+    const day = new Date().toISOString().slice(0, 10);
+    const dir = path.join(mediaUploadsDir, safeFilePart(phoneKey, "unknown"), day);
+    await fs.mkdir(dir, { recursive: true });
+
+    const fileName = [
+      Date.now(),
+      safeFilePart(kind, "media"),
+      safeFilePart(messageId, "message")
+    ].join("-") + extensionForMimeType(mimeType);
+    const filePath = path.join(dir, fileName);
+    await fs.writeFile(filePath, buffer);
+    return filePath;
   }
 
   async startAuthFlow(timeoutMs = 20_000) {

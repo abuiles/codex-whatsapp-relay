@@ -15,6 +15,7 @@ export const controllerStateFile = path.join(dataDir, "controller-state.json");
 export const controllerLogFile = path.join(dataDir, "controller.log");
 export const controllerOutboxDir = path.join(dataDir, "controller-outbox");
 export const controllerOutboxFailedDir = path.join(dataDir, "controller-outbox.failed");
+export const mediaUploadsDir = path.join(dataDir, "uploads");
 export const controllerDaemonScript = path.join(scriptDir, "controller-daemon.mjs");
 export const globalControllerOwnerFile = path.join(
   process.env.HOME ?? repoRoot,
@@ -28,4 +29,5 @@ export async function ensureRuntimeDirs() {
   await fs.mkdir(authDir, { recursive: true });
   await fs.mkdir(controllerOutboxDir, { recursive: true });
   await fs.mkdir(controllerOutboxFailedDir, { recursive: true });
+  await fs.mkdir(mediaUploadsDir, { recursive: true });
 }
