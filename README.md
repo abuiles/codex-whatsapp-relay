@@ -347,6 +347,83 @@ Optional environment variables:
 
 The first voice note can be noticeably slower because the selected provider may need to populate a local cache. Model binaries are intentionally not committed to this repository.
 
+### Windows Voice Setup
+
+Windows support uses a different local voice stack than the original macOS-first flow.
+
+For incoming WhatsApp voice notes, install:
+
+- `ffmpeg` on `PATH`, used to normalize WhatsApp audio to mono 16 kHz WAV.
+- `whisper.cpp`, built or downloaded locally with a `whisper-cli.exe` binary.
+- A local GGML Whisper model, for example `ggml-small.bin`.
+
+By default, the Windows transcriber expects:
+
+```text
+plugins/whatsapp-relay/tools/whisper.cpp/Release/whisper-cli.exe
+plugins/whatsapp-relay/tools/whisper.cpp/models/ggml-small.bin
+```
+
+If your files live elsewhere, set:
+
+```powershell
+$env:WHATSAPP_RELAY_STT_PROVIDER = "whisper-cpp"
+$env:WHATSAPP_RELAY_STT_WHISPER_CPP_BIN = "C:\path\to\whisper-cli.exe"
+$env:WHATSAPP_RELAY_STT_WHISPER_CPP_MODEL = "C:\path\to\ggml-small.bin"
+```
+
+Optional tuning:
+
+```powershell
+$env:WHATSAPP_RELAY_STT_LANGUAGE = "auto"
+$env:WHATSAPP_RELAY_STT_THREADS = "8"
+$env:WHATSAPP_RELAY_STT_TIMEOUT_MS = "480000"
+```
+
+For outbound WhatsApp voice-note replies on Windows, the default `system` provider uses Windows SAPI through PowerShell. It does not require macOS `say`; Windows already provides the speech API. Text replies are always sent first, and the voice note is an additional companion.
+
+For better local neural French voice replies on Windows, use Kokoro ONNX:
+
+```powershell
+cd plugins\whatsapp-relay
+mkdir tools\kokoro-onnx
+cd tools\kokoro-onnx
+uv venv .venv
+.\.venv\Scripts\python.exe -m pip install kokoro-onnx soundfile "misaki-fork[en]"
+```
+
+Then download these model files into `plugins/whatsapp-relay/tools/kokoro-onnx`:
+
+```text
+kokoro-v1.0.onnx
+voices-v1.0.bin
+```
+
+Enable Kokoro with:
+
+```powershell
+$env:WHATSAPP_RELAY_TTS_PROVIDER = "kokoro"
+```
+
+The default Kokoro paths on Windows are:
+
+```text
+plugins/whatsapp-relay/tools/kokoro-onnx/.venv/Scripts/python.exe
+plugins/whatsapp-relay/tools/kokoro-onnx/kokoro-v1.0.onnx
+plugins/whatsapp-relay/tools/kokoro-onnx/voices-v1.0.bin
+```
+
+If you install Kokoro elsewhere, set:
+
+```powershell
+$env:WHATSAPP_RELAY_TTS_KOKORO_PYTHON = "C:\path\to\python.exe"
+$env:WHATSAPP_RELAY_TTS_KOKORO_MODEL = "C:\path\to\kokoro-v1.0.onnx"
+$env:WHATSAPP_RELAY_TTS_KOKORO_VOICES = "C:\path\to\voices-v1.0.bin"
+$env:WHATSAPP_RELAY_TTS_KOKORO_VOICE = "ff_siwis"
+```
+
+Keep everything under `plugins/whatsapp-relay/tools/` out of git. Whisper binaries, Whisper models, Kokoro virtualenvs, Kokoro model files, and generated audio samples are local runtime assets only.
+
 ## Voice Replies
 
 Outbound voice replies are also local-first.

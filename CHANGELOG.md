@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 - Windows voice-note transcription support through a local `whisper.cpp` provider.
 - Optional Kokoro ONNX outbound voice-reply provider for local neural TTS.
 - Context monitoring commands, including `/ctx`, `/compact`, and `/autocompact`.
+- Windows voice setup documentation for `ffmpeg`, `whisper.cpp`, GGML Whisper models, SAPI, and Kokoro ONNX.
 
 ### Changed
 
