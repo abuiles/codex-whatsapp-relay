@@ -6,6 +6,7 @@ import path from "node:path";
 
 import {
   applyRunLifecycleEvent,
+  buildNextStepsPrompt,
   buildVoiceReplyTextCompanion,
   buildDangerFullAccessConfirmationMessage,
   formatProjectRunReplyPrefix,
@@ -15,6 +16,12 @@ import {
   WhatsAppControllerBridge,
   parseImplicitProjectCommand,
   parseApprovalTargetPayload,
+  parseContextMonitorCommandPayload,
+  parseModelCommandPayload,
+  parseNextStepsCommandPayload,
+  parseUnreadCommandPayload,
+  parseReasoningCommandPayload,
+  parseMissionCommandPayload,
   parseVoiceReplyCommandPayload,
   normalizeVoiceCommandText,
   parseIncomingCommand,
@@ -32,6 +39,27 @@ import { ControllerStateStore } from "./controller-state.mjs";
 test("parseIncomingCommand accepts shortcut aliases for admin commands", () => {
   assert.deepEqual(parseIncomingCommand("/h", true), { type: "help" });
   assert.deepEqual(parseIncomingCommand("/st", true), { type: "status", payload: "" });
+  assert.deepEqual(parseIncomingCommand("/model", true), { type: "model", payload: "" });
+  assert.deepEqual(parseIncomingCommand("/models gpt-5.5", true), {
+    type: "models",
+    payload: "gpt-5.5"
+  });
+  assert.deepEqual(parseIncomingCommand("/reasoning xhigh", true), {
+    type: "reasoning",
+    payload: "xhigh"
+  });
+  assert.deepEqual(parseIncomingCommand("/nextsteps off", true), {
+    type: "nextSteps",
+    payload: "off"
+  });
+  assert.deepEqual(parseIncomingCommand("/unread on", true), {
+    type: "unreadSettings",
+    payload: "on"
+  });
+  assert.deepEqual(parseIncomingCommand("/mission erp-mvp improve cockpit flow", true), {
+    type: "mission",
+    payload: "erp-mvp improve cockpit flow"
+  });
   assert.deepEqual(parseIncomingCommand("/n review this diff", true), {
     type: "new",
     prompt: "review this diff"
@@ -40,6 +68,22 @@ test("parseIncomingCommand accepts shortcut aliases for admin commands", () => {
   assert.deepEqual(parseIncomingCommand("/project alpha-app", true), {
     type: "project",
     payload: "alpha-app"
+  });
+  assert.deepEqual(parseIncomingCommand("/ctx", true), {
+    type: "context",
+    payload: ""
+  });
+  assert.deepEqual(parseIncomingCommand("/context alpha-app", true), {
+    type: "context",
+    payload: "alpha-app"
+  });
+  assert.deepEqual(parseIncomingCommand("/compact alpha-app", true), {
+    type: "compact",
+    payload: "alpha-app"
+  });
+  assert.deepEqual(parseIncomingCommand("/autocompact on 80", true), {
+    type: "contextMonitor",
+    payload: "on 80"
   });
   assert.deepEqual(parseIncomingCommand("/project 2", true), {
     type: "project",
@@ -108,6 +152,216 @@ test("parseIncomingCommand accepts shortcut aliases for admin commands", () => {
   assert.deepEqual(parseIncomingCommand("/x", true), { type: "stop", payload: "" });
 });
 
+test("parseModelCommandPayload handles status, overrides, and resets", () => {
+  const config = {
+    defaultProject: "alpha-app",
+    model: "gpt-5.4",
+    projects: [
+      { alias: "alpha-app", workspace: "/workspace/alpha-app" },
+      { alias: "beta-app", workspace: "/workspace/beta-app", model: "gpt-5.4-mini" }
+    ]
+  };
+
+  assert.deepEqual(parseModelCommandPayload("", config), {
+    action: "status",
+    scope: "project",
+    projectAlias: null,
+    model: null,
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseModelCommandPayload("global", config), {
+    action: "status",
+    scope: "global",
+    projectAlias: null,
+    model: null,
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseModelCommandPayload("gpt-5.4-mini", config), {
+    action: "set",
+    scope: "project",
+    projectAlias: null,
+    model: "gpt-5.4-mini",
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseModelCommandPayload("beta-app gpt-5.4", config), {
+    action: "set",
+    scope: "project",
+    projectAlias: "beta-app",
+    model: "gpt-5.4",
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseModelCommandPayload("reset beta-app", config), {
+    action: "reset",
+    scope: "project",
+    projectAlias: "beta-app",
+    model: null,
+    ambiguousProjects: []
+  });
+});
+
+test("parseReasoningCommandPayload handles status, overrides, aliases, and resets", () => {
+  const config = {
+    defaultProject: "alpha-app",
+    modelReasoningEffort: "medium",
+    projects: [
+      { alias: "alpha-app", workspace: "/workspace/alpha-app" },
+      {
+        alias: "beta-app",
+        workspace: "/workspace/beta-app",
+        modelReasoningEffort: "high"
+      }
+    ]
+  };
+
+  assert.deepEqual(parseReasoningCommandPayload("", config), {
+    action: "status",
+    scope: "project",
+    projectAlias: null,
+    reasoning: null,
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseReasoningCommandPayload("global", config), {
+    action: "status",
+    scope: "global",
+    projectAlias: null,
+    reasoning: null,
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseReasoningCommandPayload("tres approfondi", config), {
+    action: "set",
+    scope: "project",
+    projectAlias: null,
+    reasoning: "xhigh",
+    rawReasoning: "tres approfondi",
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseReasoningCommandPayload("beta-app eleve", config), {
+    action: "set",
+    scope: "project",
+    projectAlias: "beta-app",
+    reasoning: "high",
+    rawReasoning: "eleve",
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseReasoningCommandPayload("global xhigh", config), {
+    action: "set",
+    scope: "global",
+    projectAlias: null,
+    reasoning: "xhigh",
+    rawReasoning: "xhigh",
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseReasoningCommandPayload("reset beta-app", config), {
+    action: "reset",
+    scope: "project",
+    projectAlias: "beta-app",
+    reasoning: null,
+    ambiguousProjects: []
+  });
+});
+
+test("parseNextStepsCommandPayload handles status and toggles", () => {
+  assert.deepEqual(parseNextStepsCommandPayload(""), { action: "status" });
+  assert.deepEqual(parseNextStepsCommandPayload("status"), { action: "status" });
+  assert.deepEqual(parseNextStepsCommandPayload("on"), { action: "on" });
+  assert.deepEqual(parseNextStepsCommandPayload("activer"), { action: "on" });
+  assert.deepEqual(parseNextStepsCommandPayload("off"), { action: "off" });
+  assert.deepEqual(parseNextStepsCommandPayload("desactiver"), { action: "off" });
+  assert.deepEqual(parseNextStepsCommandPayload("maybe"), { action: "unknown" });
+});
+
+test("parseUnreadCommandPayload handles status and toggles", () => {
+  assert.deepEqual(parseUnreadCommandPayload(""), { action: "status" });
+  assert.deepEqual(parseUnreadCommandPayload("status"), { action: "status" });
+  assert.deepEqual(parseUnreadCommandPayload("on"), { action: "on" });
+  assert.deepEqual(parseUnreadCommandPayload("activer"), { action: "on" });
+  assert.deepEqual(parseUnreadCommandPayload("off"), { action: "off" });
+  assert.deepEqual(parseUnreadCommandPayload("desactiver"), { action: "off" });
+  assert.deepEqual(parseUnreadCommandPayload("maybe"), { action: "unknown" });
+});
+
+test("parseMissionCommandPayload handles starts and controls", () => {
+  const config = {
+    defaultProject: "alpha-app",
+    projects: [
+      { alias: "alpha-app", workspace: "/workspace/alpha-app" },
+      { alias: "beta-app", workspace: "/workspace/beta-app" }
+    ]
+  };
+
+  assert.deepEqual(parseMissionCommandPayload("", config), {
+    action: "status",
+    projectAlias: null,
+    objective: "",
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseMissionCommandPayload("status beta-app", config), {
+    action: "status",
+    projectAlias: "beta-app",
+    objective: "",
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseMissionCommandPayload("stop beta-app", config), {
+    action: "stop",
+    projectAlias: "beta-app",
+    objective: "",
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseMissionCommandPayload("2", config), {
+    action: "select",
+    projectAlias: null,
+    objective: "",
+    selectionIndex: 2,
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseMissionCommandPayload("cancel", config), {
+    action: "cancel",
+    projectAlias: null,
+    objective: "",
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseMissionCommandPayload("beta-app improve cockpit", config), {
+    action: "start",
+    projectAlias: "beta-app",
+    objective: "improve cockpit",
+    ambiguousProjects: []
+  });
+  assert.deepEqual(parseMissionCommandPayload("current beta-app improve cockpit", config), {
+    action: "start",
+    projectAlias: "beta-app",
+    objective: "improve cockpit",
+    ambiguousProjects: [],
+    branchMode: "current"
+  });
+  assert.deepEqual(parseMissionCommandPayload("new-branch beta-app improve cockpit", config), {
+    action: "start",
+    projectAlias: "beta-app",
+    objective: "improve cockpit",
+    ambiguousProjects: [],
+    branchMode: "new"
+  });
+  assert.deepEqual(parseMissionCommandPayload("new beta-app improve cockpit", config), {
+    action: "start",
+    projectAlias: "beta-app",
+    objective: "improve cockpit",
+    ambiguousProjects: [],
+    forceNewThread: true
+  });
+  assert.deepEqual(parseMissionCommandPayload("nouvelle session improve cockpit", config), {
+    action: "start",
+    projectAlias: null,
+    objective: "improve cockpit",
+    ambiguousProjects: [],
+    forceNewThread: true
+  });
+  assert.deepEqual(parseMissionCommandPayload("improve cockpit", config), {
+    action: "start",
+    projectAlias: null,
+    objective: "improve cockpit",
+    ambiguousProjects: []
+  });
+});
+
 test("parseIncomingCommand recognizes the natural-language new project session shortcut", () => {
   assert.deepEqual(
     parseIncomingCommand("start new session in alpha app inside code directory", true),
@@ -116,6 +370,213 @@ test("parseIncomingCommand recognizes the natural-language new project session s
       target: "alpha app inside code directory"
     }
   );
+});
+
+test("handleIncomingMessage ignores WhatsApp protocol messages", async () => {
+  const bridge = new WhatsAppControllerBridge({
+    runtime: {},
+    configStore: {
+      data: {
+        enabled: true,
+        defaultProject: "alpha-app",
+        permissionLevel: "workspace-write",
+        captureAllDirectMessages: true
+      },
+      async load() {
+        return this.data;
+      },
+      async findControllerByJid() {
+        return {
+          phoneKey: "1234567890",
+          label: "self"
+        };
+      }
+    },
+    stateStore: {
+      data: {
+        process: {}
+      },
+      getSession() {
+        return null;
+      }
+    }
+  });
+
+  let replied = false;
+  let ranPrompt = false;
+  bridge.sendReply = async () => {
+    replied = true;
+  };
+  bridge.runPrompt = async () => {
+    ranPrompt = true;
+  };
+
+  await bridge.handleIncomingMessage({
+    key: {
+      remoteJid: "1234567890@s.whatsapp.net",
+      id: "msg-1",
+      fromMe: false
+    },
+    messageTimestamp: Math.floor(Date.now() / 1000),
+    message: {
+      protocolMessage: {
+        type: 0
+      }
+    }
+  });
+
+  assert.equal(replied, false);
+  assert.equal(ranPrompt, false);
+});
+
+test("handleIncomingMessage downloads WhatsApp images and forwards them as local images", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "controller-bridge-image-test-"));
+  const filePath = path.join(tempDir, "controller-state.json");
+  const imagePath = path.join(tempDir, "image-one.jpg");
+
+  try {
+    await fs.writeFile(imagePath, "fake image");
+    const stateStore = new ControllerStateStore(filePath);
+    await stateStore.load();
+    const configData = {
+      enabled: true,
+      defaultProject: "alpha-app",
+      permissionLevel: "workspace-write",
+      captureAllDirectMessages: true,
+      projects: [
+        {
+          alias: "alpha-app",
+          workspace: tempDir
+        }
+      ]
+    };
+    const bridge = new WhatsAppControllerBridge({
+      runtime: {
+        async downloadMediaBuffer() {
+          return Buffer.from("fake image");
+        },
+        async saveInboundMediaBuffer() {
+          return imagePath;
+        }
+      },
+      configStore: {
+        data: configData,
+        async load() {
+          return this.data;
+        },
+        async findControllerByJid() {
+          return {
+            phoneKey: "123",
+            label: "self"
+          };
+        }
+      },
+      stateStore,
+      mediaBatchIdleMs: 5
+    });
+
+    const dispatched = [];
+    bridge.runPrompt = async (args) => {
+      dispatched.push(args);
+    };
+    bridge.sendReply = async () => {};
+
+    await bridge.handleIncomingMessage({
+      key: {
+        remoteJid: "123@s.whatsapp.net",
+        id: "img-1",
+        fromMe: false
+      },
+      messageTimestamp: Math.floor(Date.now() / 1000),
+      message: {
+        imageMessage: {
+          mimetype: "image/jpeg",
+          caption: "Analyse cette capture"
+        }
+      }
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    assert.equal(dispatched.length, 1);
+    assert.equal(dispatched[0].prompt, "Analyse cette capture");
+    assert.deepEqual(dispatched[0].mediaAttachments, [
+      {
+        type: "localImage",
+        path: imagePath
+      }
+    ]);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("handleIncomingMessage does not forward album markers as placeholder prompts", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "controller-bridge-album-test-"));
+  const filePath = path.join(tempDir, "controller-state.json");
+
+  try {
+    const stateStore = new ControllerStateStore(filePath);
+    await stateStore.load();
+    const configData = {
+      enabled: true,
+      defaultProject: "alpha-app",
+      permissionLevel: "workspace-write",
+      captureAllDirectMessages: true,
+      projects: [
+        {
+          alias: "alpha-app",
+          workspace: tempDir
+        }
+      ]
+    };
+    const bridge = new WhatsAppControllerBridge({
+      runtime: {},
+      configStore: {
+        data: configData,
+        async load() {
+          return this.data;
+        },
+        async findControllerByJid() {
+          return {
+            phoneKey: "123",
+            label: "self"
+          };
+        }
+      },
+      stateStore,
+      albumEmptyTimeoutMs: 5
+    });
+
+    const dispatched = [];
+    const replies = [];
+    bridge.runPrompt = async (args) => {
+      dispatched.push(args);
+    };
+    bridge.sendReply = async (_remoteJid, text) => {
+      replies.push(text);
+    };
+
+    await bridge.handleIncomingMessage({
+      key: {
+        remoteJid: "123@s.whatsapp.net",
+        id: "album-1",
+        fromMe: false
+      },
+      messageTimestamp: Math.floor(Date.now() / 1000),
+      message: {
+        albumMessage: {
+          expectedImageCount: 2
+        }
+      }
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    assert.equal(dispatched.length, 0);
+    assert.equal(replies.length, 1);
+    assert.match(replies[0], /album marker/i);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("parseApprovalTargetPayload keeps multi-word project targets intact", () => {
@@ -282,6 +743,45 @@ test("applyRunLifecycleEvent tracks live progress and approvals for an active ru
   );
   assert.equal(activeRun.status, "waiting_for_approval");
   assert.equal(activeRun.lastEventAt, "2026-03-30T10:00:03.000Z");
+
+  applyRunLifecycleEvent(
+    activeRun,
+    {
+      type: "tokenUsageUpdated",
+      threadId: "thread-backend",
+      tokenUsage: {
+        total: {
+          totalTokens: 120,
+          inputTokens: 90,
+          cachedInputTokens: 10,
+          outputTokens: 30,
+          reasoningOutputTokens: 12
+        },
+        last: {
+          totalTokens: 20,
+          inputTokens: 12,
+          cachedInputTokens: 1,
+          outputTokens: 8,
+          reasoningOutputTokens: 4
+        },
+        modelContextWindow: 1050000
+      }
+    },
+    "2026-03-30T10:00:04.000Z"
+  );
+  assert.equal(activeRun.lastTokenUsage.total.totalTokens, 120);
+  assert.equal(activeRun.lastTokenUsageAt, "2026-03-30T10:00:04.000Z");
+
+  applyRunLifecycleEvent(
+    activeRun,
+    {
+      type: "contextCompactionCompleted",
+      threadId: "thread-backend",
+      compactedAt: "2026-03-30T10:00:05.000Z"
+    },
+    "2026-03-30T10:00:05.000Z"
+  );
+  assert.equal(activeRun.lastCompactedAt, "2026-03-30T10:00:05.000Z");
 });
 
 test("WhatsAppControllerBridge summary reports the active project's thread id", () => {
@@ -364,6 +864,10 @@ test("renderSessionStatus includes live run status and preview for active projec
       }
     }
   });
+  bridge.codexDefaults = {
+    model: "gpt-5.4",
+    modelReasoningEffort: "xhigh"
+  };
   bridge.activeRuns.set("project:123:alpha-app", {
     status: "finalizing",
     progressPreview: "Preparing the final answer",
@@ -371,9 +875,70 @@ test("renderSessionStatus includes live run status and preview for active projec
   });
 
   const status = bridge.renderSessionStatus("123");
+  assert.match(status, /model: gpt-5\.4 \(Codex config\.toml\)/);
   assert.match(status, /run_status: finalizing/);
   assert.match(status, /run_preview: Preparing the final answer/);
   assert.match(status, /run_progress_at: 2026-03-30T10:00:04.000Z/);
+});
+
+test("renderSessionStatus includes latest observed context usage and compaction info", () => {
+  const bridge = new WhatsAppControllerBridge({
+    runtime: {},
+    configStore: {
+      data: {
+        defaultProject: "alpha-app",
+        permissionLevel: "workspace-write"
+      }
+    },
+    stateStore: {
+      data: {
+        process: {}
+      },
+      getSession() {
+        return {
+          phoneKey: "123",
+          activeProject: "alpha-app",
+          projects: {
+            "alpha-app": {
+              threadId: "thread-backend",
+              permissionLevel: "workspace-write",
+              lastTokenUsage: {
+                total: {
+                  totalTokens: 123456,
+                  inputTokens: 100000,
+                  cachedInputTokens: 5000,
+                  outputTokens: 23456,
+                  reasoningOutputTokens: 12000
+                },
+                last: {
+                  totalTokens: 2345,
+                  inputTokens: 1200,
+                  cachedInputTokens: 100,
+                  outputTokens: 1145,
+                  reasoningOutputTokens: 600
+                },
+                modelContextWindow: 1050000
+              },
+              lastTokenUsageAt: "2026-04-22T19:00:00.000Z",
+              lastCompactedAt: "2026-04-22T19:05:00.000Z"
+            }
+          }
+        };
+      }
+    }
+  });
+
+  const status = bridge.renderSessionStatus("123");
+  assert.match(
+    status,
+    /last_turn_context_usage: 0\.2% of 1,050,000 tokens \(2,345 used in last turn\)/
+  );
+  assert.match(
+    status,
+    /cumulative_context_tokens: 123,456 observed historically \(11\.8% of the window cumulatively, not live usage\)/
+  );
+  assert.match(status, /context_usage_observed_at: 2026-04-22T19:00:00.000Z/);
+  assert.match(status, /last_compacted_at: 2026-04-22T19:05:00.000Z/);
 });
 
 test("renderSessionStatus includes queued message counts for project and btw scopes", () => {
@@ -616,6 +1181,22 @@ test("parseVoiceReplyCommandPayload parses status and speed controls", () => {
   assert.deepEqual(parseVoiceReplyCommandPayload("off"), { action: "off" });
 });
 
+test("parseContextMonitorCommandPayload parses alert and auto-compact controls", () => {
+  assert.deepEqual(parseContextMonitorCommandPayload(""), { action: "status" });
+  assert.deepEqual(parseContextMonitorCommandPayload("on 80"), {
+    action: "autoOn",
+    thresholdPercent: 80
+  });
+  assert.deepEqual(parseContextMonitorCommandPayload("off"), { action: "autoOff" });
+  assert.deepEqual(parseContextMonitorCommandPayload("alert on 75"), {
+    action: "alertOn",
+    thresholdPercent: 75
+  });
+  assert.deepEqual(parseContextMonitorCommandPayload("alert off"), {
+    action: "alertOff"
+  });
+});
+
 test("resolveRunVoiceReply prefers the latest active-run voice setting", () => {
   assert.deepEqual(
     resolveRunVoiceReply(
@@ -706,6 +1287,115 @@ test("handleVoiceReplyCommand updates active runs without requiring /stop", asyn
   }
 });
 
+test("handleUnreadCommand toggles mark-replies-unread for the chat", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "unread-mode-test-"));
+  const filePath = path.join(tempDir, "controller-state.json");
+
+  try {
+    const stateStore = new ControllerStateStore(filePath);
+    await stateStore.load();
+    await stateStore.upsertSession("123", {
+      phoneKey: "123",
+      activeProject: "alpha-app",
+      remoteJid: "123@s.whatsapp.net",
+      label: "Test User"
+    });
+
+    const bridge = new WhatsAppControllerBridge({
+      runtime: {},
+      configStore: {
+        data: {
+          defaultProject: "alpha-app",
+          permissionLevel: "workspace-write"
+        }
+      },
+      stateStore
+    });
+
+    const replies = [];
+    bridge.sendReply = async (_remoteJid, text) => {
+      replies.push(text);
+    };
+
+    await bridge.handleUnreadCommand({
+      phoneKey: "123",
+      remoteJid: "123@s.whatsapp.net",
+      payload: "on",
+      label: "Test User"
+    });
+
+    assert.equal(stateStore.getSession("123").markRepliesUnread, true);
+    assert.match(replies[0], /will now mark/i);
+
+    await bridge.handleUnreadCommand({
+      phoneKey: "123",
+      remoteJid: "123@s.whatsapp.net",
+      payload: "off",
+      label: "Test User"
+    });
+
+    assert.equal(stateStore.getSession("123").markRepliesUnread, false);
+    assert.match(replies[1], /will no longer mark/i);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("maybeMarkReplyUnread asks runtime to mark the chat unread after replies", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "unread-after-reply-test-"));
+  const filePath = path.join(tempDir, "controller-state.json");
+
+  try {
+    const stateStore = new ControllerStateStore(filePath);
+    await stateStore.load();
+    await stateStore.upsertSession("123", {
+      phoneKey: "123",
+      activeProject: "alpha-app",
+      remoteJid: "123@s.whatsapp.net",
+      label: "Test User",
+      markRepliesUnread: true
+    });
+
+    const calls = [];
+    const bridge = new WhatsAppControllerBridge({
+      runtime: {
+        async markChatUnread(chatId, messages) {
+          calls.push({ chatId, messages });
+        }
+      },
+      configStore: {
+        data: {
+          defaultProject: "alpha-app",
+          permissionLevel: "workspace-write"
+        }
+      },
+      stateStore
+    });
+
+    const marked = await bridge.maybeMarkReplyUnread({
+      phoneKey: "123",
+      remoteJid: "123@s.whatsapp.net",
+      sentMessage: {
+        key: {
+          remoteJid: "123@s.whatsapp.net",
+          id: "sent-1",
+          fromMe: true
+        },
+        messageTimestamp: 1778520000
+      }
+    });
+
+    assert.equal(marked, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].chatId, "123@s.whatsapp.net");
+    assert.equal(calls[0].messages[0].key.id, "sent-1");
+    assert.equal(stateStore.getSession("123").lastReplyMarkedUnreadError, null);
+    assert.match(stateStore.getSession("123").lastReplyMarkedUnreadAt, /^\d{4}-/);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("extractOneShotVoiceReplyRequest pulls a one-off spoken reply directive out of text", () => {
   assert.deepEqual(
     extractOneShotVoiceReplyRequest(
@@ -739,8 +1429,16 @@ test("extractOneShotVoiceReplyRequest accepts transcribed speed variants like on
 test("buildVoiceReplyPrompt instructs Codex to emit a hidden reply language tag", () => {
   const prompt = buildVoiceReplyPrompt("Explain the change.");
   assert.match(prompt, /\[\[reply_language:<language-code>\]\]/);
-  assert.match(prompt, /for example en, es, it, or pt-BR/i);
+  assert.match(prompt, /for example fr, en, es, it, or pt-BR/i);
   assert.match(prompt, /do not mention the metadata/i);
+});
+
+test("buildNextStepsPrompt asks for compact recommended next steps", () => {
+  const prompt = buildNextStepsPrompt("Analyse cette section.");
+  assert.match(prompt, /^Analyse cette section\./);
+  assert.match(prompt, /recommended next steps/i);
+  assert.match(prompt, /1-3 concrete next actions/i);
+  assert.match(prompt, /\/mission run/i);
 });
 
 test("extractVoiceReplyEnvelope strips the language tag before delivery", () => {

@@ -2,12 +2,41 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  buildPromptInput,
   buildProjectIntentPrompt,
   buildVoiceCommandIntentPrompt,
   normalizeCodexTurnNotification,
+  parseCodexConfigDefaults,
+  parseCodexModelCatalog,
   normalizeProjectIntentSelection,
   normalizeVoiceCommandIntent
 } from "./codex-runner.mjs";
+
+test("buildPromptInput forwards local images to Codex app-server", () => {
+  assert.deepEqual(
+    buildPromptInput("analyse these", [
+      { type: "localImage", path: "C:\\tmp\\one.jpg" },
+      { type: "localImage", path: "  C:\\tmp\\two.png  " },
+      { type: "localImage", path: " " },
+      { type: "unsupported", path: "C:\\tmp\\ignored.jpg" }
+    ]),
+    [
+      {
+        type: "text",
+        text: "analyse these",
+        text_elements: []
+      },
+      {
+        type: "localImage",
+        path: "C:\\tmp\\one.jpg"
+      },
+      {
+        type: "localImage",
+        path: "C:\\tmp\\two.png"
+      }
+    ]
+  );
+});
 
 test("buildVoiceCommandIntentPrompt includes project context for Codex classification", () => {
   const prompt = buildVoiceCommandIntentPrompt({
@@ -234,4 +263,145 @@ test("normalizeCodexTurnNotification ignores unrelated turns and threads", () =>
     ),
     null
   );
+});
+
+test("parseCodexModelCatalog keeps only usable model slugs", () => {
+  const models = parseCodexModelCatalog(
+    JSON.stringify({
+      models: [
+        {
+          slug: "gpt-5.4",
+          display_name: "gpt-5.4",
+          description: "Flagship coding model.",
+          visibility: "list",
+          default_reasoning_level: "high",
+          upgrade: {
+            model: "gpt-5.5"
+          }
+        },
+        {
+          slug: ""
+        }
+      ]
+    })
+  );
+
+  assert.deepEqual(models, [
+    {
+      slug: "gpt-5.4",
+      displayName: "gpt-5.4",
+      description: "Flagship coding model.",
+      visibility: "list",
+      defaultReasoningLevel: "high",
+      upgradeModel: "gpt-5.5"
+    }
+  ]);
+});
+
+test("parseCodexConfigDefaults reads only top-level model settings", () => {
+  const defaults = parseCodexConfigDefaults(`
+model = "gpt-5.4"
+model_reasoning_effort = "xhigh"
+profile = "local-dev"
+
+[projects.'C:\\Users\\example\\repo']
+model = "project-only"
+`);
+
+  assert.deepEqual(defaults, {
+    model: "gpt-5.4",
+    modelReasoningEffort: "xhigh",
+    profile: "local-dev"
+  });
+});
+
+test("normalizeCodexTurnNotification captures token usage updates for the active thread", () => {
+  assert.deepEqual(
+    normalizeCodexTurnNotification(
+      {
+        method: "thread/tokenUsage/updated",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          tokenUsage: {
+            total: {
+              totalTokens: 123,
+              inputTokens: 100,
+              cachedInputTokens: 5,
+              outputTokens: 23,
+              reasoningOutputTokens: 7
+            },
+            last: {
+              totalTokens: 23,
+              inputTokens: 12,
+              cachedInputTokens: 1,
+              outputTokens: 11,
+              reasoningOutputTokens: 3
+            },
+            modelContextWindow: 1050000
+          }
+        }
+      },
+      { activeTurnId: "turn-1", resolvedThreadId: "thread-1" }
+    ),
+    {
+      type: "tokenUsageUpdated",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      tokenUsage: {
+        total: {
+          totalTokens: 123,
+          inputTokens: 100,
+          cachedInputTokens: 5,
+          outputTokens: 23,
+          reasoningOutputTokens: 7
+        },
+        last: {
+          totalTokens: 23,
+          inputTokens: 12,
+          cachedInputTokens: 1,
+          outputTokens: 11,
+          reasoningOutputTokens: 3
+        },
+        modelContextWindow: 1050000
+      }
+    }
+  );
+});
+
+test("normalizeCodexTurnNotification captures context compaction lifecycle events", () => {
+  const itemCompaction = normalizeCodexTurnNotification(
+    {
+      method: "item/completed",
+      params: {
+        turnId: "turn-1",
+        item: {
+          type: "contextCompaction",
+          id: "compact-1"
+        }
+      }
+    },
+    { activeTurnId: "turn-1", resolvedThreadId: "thread-1" }
+  );
+
+  assert.equal(itemCompaction?.type, "contextCompactionCompleted");
+  assert.equal(itemCompaction?.threadId, "thread-1");
+  assert.equal(itemCompaction?.turnId, "turn-1");
+  assert.match(itemCompaction?.compactedAt ?? "", /^\d{4}-\d{2}-\d{2}T/);
+
+  const threadCompaction = normalizeCodexTurnNotification(
+    {
+      method: "thread/compacted",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-7"
+      }
+    },
+    { activeTurnId: "turn-1", resolvedThreadId: "thread-1" }
+  );
+
+  assert.equal(threadCompaction?.type, "contextCompactionCompleted");
+  assert.equal(threadCompaction?.threadId, "thread-1");
+  assert.equal(threadCompaction?.turnId, "turn-7");
+  assert.match(threadCompaction?.compactedAt ?? "", /^\d{4}-\d{2}-\d{2}T/);
 });

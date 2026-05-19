@@ -18,6 +18,8 @@ The controller bridge is now project-aware. One chat can keep `api` busy, switch
 - jump between saved Codex sessions inside one project
 - approve, deny, stop, or lower permissions from WhatsApp
 - talk to Codex with voice notes and get local voice-note replies back
+- send WhatsApp images or photo albums into the active Codex project thread
+- optionally mark the WhatsApp chat unread after completed Codex replies
 - resume the same work later in your terminal with `codex resume`
 
 ## Install In Codex
@@ -122,6 +124,7 @@ Once the controller bridge is running, allowed direct chats can send:
 
 - plain text to continue the active project's current Codex session
 - voice notes to continue the active project's current Codex session after local transcription
+- images and photo albums to continue the active project with Codex `localImage` inputs
 
 Project control:
 
@@ -141,6 +144,14 @@ Session control:
 - `/session <project> <number|thread-id-prefix>` or `/c <...>` to switch another project's session directly
 - `/status` or `/st [project]` to inspect the active project session or another project's session, including the live run status and latest progress preview while a run is active
 
+Context control:
+
+- `/context` or `/ctx [project]` to inspect the latest observed context usage for a project session
+- `/compact [project]` to ask Codex to compact a project thread
+- `/autocompact` to inspect context alert and auto-compact settings
+- `/autocompact on [80]` or `/autocompact off` to enable or disable idle auto-compaction
+- `/autocompact alert on [75]` or `/autocompact alert off` to enable or disable context pressure alerts
+
 If you send another normal prompt while that same project or `/btw` scope is already busy, the relay now queues it, acknowledges that it was queued, and automatically runs it after the current task finishes unless you explicitly stop the active run. Stopping a scope also clears that scope's queued follow-ups so stale prompts do not linger.
 
 Permissions and approvals:
@@ -150,6 +161,7 @@ Permissions and approvals:
 - `/permissions ro|ww|dfa` or `/permissions <project> read-only|workspace-write|danger-full-access` to change a project's sandbox level
 - `/approve` or `/a [project|btw] [session]`, `/deny` or `/d [project|btw]`, and `/cancel` or `/q [project|btw]` to answer pending approval prompts
 - `/stop` or `/x [project|btw]` to cancel an in-flight Codex run
+- `/unread`, `/unread on`, or `/unread off` to inspect or change whether completed Codex replies mark this WhatsApp chat unread after delivery
 - `/help` or `/h` to see command help
 
 Voice replies:
@@ -160,12 +172,14 @@ Voice replies:
 - `reply in voice at 1x ...` or `reply in voice at 2x ...` for a one-off spoken answer without changing the chat default
 
 `danger-full-access` requires an explicit confirmation code sent back over WhatsApp before the bridge disables the sandbox for that project session. For the active project, the bridge now asks you to confirm with a short reply like `/dfa 123456`; for another project it uses `/dfa <project> 123456`.
-Voice notes are transcribed locally with `mlx-community/parakeet-tdt-0.6b-v3` through `uvx` and `ffmpeg`. The bridge echoes the transcript back before acting on it, and very short low-confidence transcriptions are rejected so you can retry instead of sending garbage to Codex.
+Voice notes are transcribed locally. On macOS/Linux the default provider is `mlx-community/parakeet-tdt-0.6b-v3` through `uvx` and `ffmpeg`; on Windows the default provider is `whisper.cpp`. The bridge echoes the transcript back before acting on it, and very short low-confidence transcriptions are rejected when confidence metadata is available so you can retry instead of sending garbage to Codex.
 High-impact repo actions such as merges, releases, rebases, retargets, and deletes are intentionally not executed straight from voice; the bridge asks you to resend those as text so a misheard number does not mutate the wrong branch or PR.
-When voice replies are enabled with `/voice on` or a one-shot `reply in voice at 2x ...` prompt, the bridge also synthesizes a local outbound WhatsApp voice note.
+When voice replies are enabled with `/voice on` or a one-shot `reply in voice at 2x ...` prompt, the bridge sends the text reply first and also synthesizes a local outbound WhatsApp voice note.
 If a spoken reply contains something you need to click or copy, such as a preview URL, link, slash command, or confirmation code, the bridge now sends a short text companion with those actionable bits.
 
 Project switching is sticky per chat. One-shot `/in` prompts do not change the active project, and `/btw` always uses a fresh disposable thread.
+
+Unread markers are opt-in per chat with `/unread on`. They are best-effort because WhatsApp may immediately mark the conversation read again if it is open on another linked device.
 
 ## Working Across Projects From WhatsApp
 
@@ -293,7 +307,7 @@ voice note
 - can handle disposable `/btw` questions outside the main project thread
 - can run each phone chat at `read-only`, `workspace-write`, or `danger-full-access`
 - can transcribe WhatsApp voice notes locally and feed them into the active Codex session
-- can synthesize local WhatsApp voice-note replies with either macOS `say` or `ResembleAI/chatterbox-turbo`
+- can synthesize local WhatsApp voice-note replies with system TTS, Chatterbox, or Kokoro ONNX
 
 ## Safety Notes
 
@@ -301,38 +315,141 @@ voice note
 - `danger-full-access` is per-chat and requires a short confirmation code reply such as `/dfa 123456`. Use `/new` or `/permissions workspace-write` to drop back down.
 - Only one controller bridge should own the live WhatsApp session at a time. Starting a second checkout now refuses instead of silently replacing the current bridge.
 - Auth material under `plugins/whatsapp-relay/data/auth*` is local runtime state and should never be committed.
+- Runtime controller state, local chat stores, logs, generated audio, downloaded models, and local toolchains should stay out of git.
+- Downloaded WhatsApp image uploads are stored under `plugins/whatsapp-relay/data/uploads/` and should stay local.
 - Typed slash commands remain the most reliable way to change sessions or permissions. Voice notes work best for natural prompts and short spoken commands like `help`, `status`, `stop`, and `new session`.
+
+## Context Monitoring
+
+The bridge can report context pressure for project sessions when Codex emits token-usage updates. `/ctx` focuses on the last observed turn relative to the model context window, because cumulative historical token totals can exceed the window many times over and are not the same thing as live context usage.
+
+Context monitor settings live in `plugins/whatsapp-relay/data/controller-config.json`:
+
+- `contextAlertsEnabled` defaults to `true`
+- `contextAlertThresholdPercent` defaults to `75`
+- `contextAutoCompactEnabled` defaults to `false`
+- `contextAutoCompactThresholdPercent` defaults to `80`
+
+Auto-compaction only runs while the project is idle. If a run is active, the bridge waits for the run to complete before considering queued prompts or idle compaction.
 
 ## Voice Notes
 
-Voice-note control is local-first. The bridge downloads the WhatsApp audio, normalizes it with `ffmpeg`, runs Parakeet v3 through `uvx`, and then forwards the transcript into the existing `codex app-server` session.
+Voice-note control is local-first. The bridge downloads the WhatsApp audio, normalizes it with `ffmpeg`, transcribes it locally, echoes the transcript into WhatsApp, and then forwards the transcript into the existing `codex app-server` session.
 
 You need these local tools available on the machine running the bridge:
 
 - `ffmpeg`
-- `uvx`
+- `uvx` for the Parakeet provider
+- `whisper.cpp` plus a local GGML Whisper model for the `whisper-cpp` provider
 
 Optional environment variables:
 
+- `WHATSAPP_RELAY_STT_PROVIDER=parakeet-mlx|whisper-cpp` to choose the transcription provider
 - `WHATSAPP_RELAY_STT_MODEL` to override the default `mlx-community/parakeet-tdt-0.6b-v3`
+- `WHATSAPP_RELAY_STT_WHISPER_CPP_BIN` to point at `whisper-cli` or `whisper-cli.exe`
+- `WHATSAPP_RELAY_STT_WHISPER_CPP_MODEL` to point at a local GGML Whisper model
+- `WHATSAPP_RELAY_STT_LANGUAGE` to force a Whisper language, or `auto` for detection
+- `WHATSAPP_RELAY_STT_THREADS` to tune Whisper CPU threads
 - `WHATSAPP_RELAY_STT_TIMEOUT_MS` to extend or reduce the transcription timeout
 
-The first voice note can be noticeably slower because `uvx` may need to install `parakeet-mlx` and download the model cache.
+The first voice note can be noticeably slower because the selected provider may need to populate a local cache. Model binaries are intentionally not committed to this repository.
+
+### Windows Voice Setup
+
+Windows support uses a different local voice stack than the original macOS-first flow.
+
+For incoming WhatsApp voice notes, install:
+
+- `ffmpeg` on `PATH`, used to normalize WhatsApp audio to mono 16 kHz WAV.
+- `whisper.cpp`, built or downloaded locally with a `whisper-cli.exe` binary.
+- A local GGML Whisper model, for example `ggml-small.bin`.
+
+By default, the Windows transcriber expects:
+
+```text
+plugins/whatsapp-relay/tools/whisper.cpp/Release/whisper-cli.exe
+plugins/whatsapp-relay/tools/whisper.cpp/models/ggml-small.bin
+```
+
+If your files live elsewhere, set:
+
+```powershell
+$env:WHATSAPP_RELAY_STT_PROVIDER = "whisper-cpp"
+$env:WHATSAPP_RELAY_STT_WHISPER_CPP_BIN = "C:\path\to\whisper-cli.exe"
+$env:WHATSAPP_RELAY_STT_WHISPER_CPP_MODEL = "C:\path\to\ggml-small.bin"
+```
+
+Optional tuning:
+
+```powershell
+$env:WHATSAPP_RELAY_STT_LANGUAGE = "auto"
+$env:WHATSAPP_RELAY_STT_THREADS = "8"
+$env:WHATSAPP_RELAY_STT_TIMEOUT_MS = "480000"
+```
+
+For outbound WhatsApp voice-note replies on Windows, the default `system` provider uses Windows SAPI through PowerShell. It does not require macOS `say`; Windows already provides the speech API. Text replies are always sent first, and the voice note is an additional companion.
+
+For better local neural French voice replies on Windows, use Kokoro ONNX:
+
+```powershell
+cd plugins\whatsapp-relay
+mkdir tools\kokoro-onnx
+cd tools\kokoro-onnx
+uv venv .venv
+.\.venv\Scripts\python.exe -m pip install kokoro-onnx soundfile "misaki-fork[en]"
+```
+
+Then download these model files into `plugins/whatsapp-relay/tools/kokoro-onnx`:
+
+```text
+kokoro-v1.0.onnx
+voices-v1.0.bin
+```
+
+Enable Kokoro with:
+
+```powershell
+$env:WHATSAPP_RELAY_TTS_PROVIDER = "kokoro"
+```
+
+The default Kokoro paths on Windows are:
+
+```text
+plugins/whatsapp-relay/tools/kokoro-onnx/.venv/Scripts/python.exe
+plugins/whatsapp-relay/tools/kokoro-onnx/kokoro-v1.0.onnx
+plugins/whatsapp-relay/tools/kokoro-onnx/voices-v1.0.bin
+```
+
+If you install Kokoro elsewhere, set:
+
+```powershell
+$env:WHATSAPP_RELAY_TTS_KOKORO_PYTHON = "C:\path\to\python.exe"
+$env:WHATSAPP_RELAY_TTS_KOKORO_MODEL = "C:\path\to\kokoro-v1.0.onnx"
+$env:WHATSAPP_RELAY_TTS_KOKORO_VOICES = "C:\path\to\voices-v1.0.bin"
+$env:WHATSAPP_RELAY_TTS_KOKORO_VOICE = "ff_siwis"
+```
+
+Keep everything under `plugins/whatsapp-relay/tools/` out of git. Whisper binaries, Whisper models, Kokoro virtualenvs, Kokoro model files, and generated audio samples are local runtime assets only.
 
 ## Voice Replies
 
 Outbound voice replies are also local-first.
 
-The default provider is Chatterbox. English replies use `Chatterbox-Turbo`, and supported non-English replies use `Chatterbox-Multilingual`.
+The default provider is Chatterbox on macOS/Linux and system TTS on Windows. English Chatterbox replies use `Chatterbox-Turbo`, and supported non-English replies use `Chatterbox-Multilingual`. Windows system TTS uses SAPI. Kokoro ONNX is available as an optional local neural provider.
 
 Provider selection is controlled with environment variables:
 
-- `WHATSAPP_RELAY_TTS_PROVIDER=system` opts out of Chatterbox and uses the macOS `say` fallback.
+- `WHATSAPP_RELAY_TTS_PROVIDER=system` opts out of Chatterbox and uses macOS `say` or Windows SAPI.
 - `WHATSAPP_RELAY_TTS_PROVIDER=chatterbox-turbo` explicitly keeps outbound voice replies on `ResembleAI/chatterbox-turbo`.
+- `WHATSAPP_RELAY_TTS_PROVIDER=kokoro` uses a local Kokoro ONNX install.
 - `WHATSAPP_RELAY_TTS_CHATTERBOX_PYTHON` overrides the Python interpreter used for Chatterbox. By default the bridge looks for `plugins/whatsapp-relay/.venv-chatterbox/bin/python`.
 - `WHATSAPP_RELAY_TTS_CHATTERBOX_DEVICE=auto|mps|cpu` controls the Chatterbox device selection. `auto` is the default.
 - `WHATSAPP_RELAY_TTS_CHATTERBOX_AUDIO_PROMPT=/absolute/path/to/reference.wav` optionally enables voice cloning for Chatterbox with a local reference clip.
 - `WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH=0` opts non-English replies back into the macOS fallback instead of multilingual Chatterbox.
+- `WHATSAPP_RELAY_TTS_KOKORO_PYTHON` overrides the Python interpreter used for Kokoro.
+- `WHATSAPP_RELAY_TTS_KOKORO_MODEL` points at `kokoro-v1.0.onnx`.
+- `WHATSAPP_RELAY_TTS_KOKORO_VOICES` points at `voices-v1.0.bin`.
+- `WHATSAPP_RELAY_TTS_KOKORO_VOICE` overrides the default voice for the detected language.
 - `WHATSAPP_RELAY_TTS_TIMEOUT_MS` extends or reduces the outbound TTS timeout for either provider.
 
 If you want the controller bridge to keep using Chatterbox across restarts, persist it in the bridge config. `whatsapp_start_controller_bridge` accepts `ttsProvider` and `ttsChatterboxAllowNonEnglish`, stores them in `plugins/whatsapp-relay/data/controller-config.json`, and reuses them for future daemon starts.
@@ -366,6 +483,8 @@ npm run whatsapp:tts:smoke -- --provider chatterbox-turbo --language-id es --tex
 ```
 
 The Chatterbox path is slower than `say` because the Python process and model are loaded locally for each generated reply. It is now the preferred provider. English uses Turbo, while supported non-English replies route through the multilingual model. If you prefer the lighter macOS voice path everywhere, set `WHATSAPP_RELAY_TTS_PROVIDER=system`. If you only want the macOS fallback for non-English replies, set `WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH=0`. On machines where Perth's native implicit watermarker is unavailable, the helper falls back to Perth's dummy watermarker so local synthesis still works.
+
+To use Kokoro locally, create a virtualenv under `plugins/whatsapp-relay/tools/kokoro-onnx`, install `kokoro-onnx`, `soundfile`, and `misaki-fork[en]`, then download `kokoro-v1.0.onnx` and `voices-v1.0.bin` into that folder. The relay uses the French `ff_siwis` voice for French replies and phonemizes non-English text before synthesis. Keep the virtualenv, model files, generated samples, and other files under `tools/` out of git.
 
 ## CLI Fallback
 

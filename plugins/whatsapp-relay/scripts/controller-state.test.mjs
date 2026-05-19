@@ -171,3 +171,58 @@ test("ControllerStateStore persists queued prompts per project and btw scope", a
     await fs.rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("ControllerStateStore normalizes persisted context usage metadata per project", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "controller-state-test-"));
+  const filePath = path.join(tempDir, "controller-state.json");
+
+  try {
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({
+        sessions: {
+          "123": {
+            phoneKey: "123",
+            activeProject: "alpha-app",
+            projects: {
+              "alpha-app": {
+                lastTokenUsage: {
+                  total: {
+                    totalTokens: 123,
+                    inputTokens: 100,
+                    cachedInputTokens: 5,
+                    outputTokens: 23,
+                    reasoningOutputTokens: 7
+                  },
+                  last: {
+                    totalTokens: 23,
+                    inputTokens: 12,
+                    cachedInputTokens: 1,
+                    outputTokens: 11,
+                    reasoningOutputTokens: 3
+                  },
+                  modelContextWindow: 1050000
+                },
+                lastTokenUsageAt: "2026-04-22T20:00:00.000Z",
+                lastCompactedAt: "2026-04-22T20:05:00.000Z"
+              }
+            }
+          }
+        }
+      }),
+      "utf8"
+    );
+
+    const store = new ControllerStateStore(filePath);
+    await store.load();
+    const session = store.getSession("123");
+
+    assert.equal(session.projects["alpha-app"].lastTokenUsage.total.totalTokens, 123);
+    assert.equal(session.projects["alpha-app"].lastTokenUsage.last.outputTokens, 11);
+    assert.equal(session.projects["alpha-app"].lastTokenUsage.modelContextWindow, 1050000);
+    assert.equal(session.projects["alpha-app"].lastTokenUsageAt, "2026-04-22T20:00:00.000Z");
+    assert.equal(session.projects["alpha-app"].lastCompactedAt, "2026-04-22T20:05:00.000Z");
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});

@@ -20,6 +20,12 @@ const LEGACY_PROJECT_FIELDS = [
   "connectedThreadName",
   "lastThreadChoices",
   "lastThreadChoicesAt",
+  "lastContextAlertAt",
+  "lastContextAlertTokenUsageAt",
+  "lastContextAlertPercent",
+  "lastAutoCompactAt",
+  "lastAutoCompactTokenUsageAt",
+  "lastAutoCompactPercent",
   "lastErrorAt",
   "lastError"
 ];
@@ -34,6 +40,7 @@ function normalizeQueuedPrompt(value = {}) {
     prompt,
     forceNewThread: Boolean(value.forceNewThread),
     queuedAt: typeof value.queuedAt === "string" ? value.queuedAt : null,
+    mediaAttachments: normalizeQueuedMediaAttachments(value.mediaAttachments),
     voiceReplyOverride:
       value.voiceReplyOverride?.enabled
         ? {
@@ -48,6 +55,91 @@ function normalizeQueuedPromptList(value) {
   return Array.isArray(value)
     ? value.map((item) => normalizeQueuedPrompt(item)).filter(Boolean)
     : [];
+}
+
+function normalizeFiniteNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeOptionalFiniteNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeTokenUsageBreakdown(value = {}) {
+  return {
+    totalTokens: normalizeFiniteNumber(value.totalTokens),
+    inputTokens: normalizeFiniteNumber(value.inputTokens),
+    cachedInputTokens: normalizeFiniteNumber(value.cachedInputTokens),
+    outputTokens: normalizeFiniteNumber(value.outputTokens),
+    reasoningOutputTokens: normalizeFiniteNumber(value.reasoningOutputTokens)
+  };
+}
+
+function normalizeQueuedMediaAttachments(value) {
+  return Array.isArray(value)
+    ? value
+        .map((item) => {
+          if (item?.type !== "localImage" || typeof item.path !== "string") {
+            return null;
+          }
+
+          const path = item.path.trim();
+          return path ? { type: "localImage", path } : null;
+        })
+        .filter(Boolean)
+    : [];
+}
+
+function normalizeTimestamp(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  if (typeof value === "bigint") {
+    return Number(value);
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeStoredMessageReference(value) {
+  const key = value?.key;
+  const id = typeof key?.id === "string" ? key.id.trim() : "";
+  const remoteJid = typeof key?.remoteJid === "string" ? key.remoteJid.trim() : "";
+  const messageTimestamp = normalizeTimestamp(value?.messageTimestamp);
+
+  if (!id || !remoteJid || !messageTimestamp) {
+    return null;
+  }
+
+  return {
+    key: {
+      remoteJid,
+      id,
+      fromMe: Boolean(key?.fromMe),
+      ...(key?.participant ? { participant: key.participant } : {})
+    },
+    messageTimestamp
+  };
+}
+
+function normalizeThreadTokenUsage(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  return {
+    total: normalizeTokenUsageBreakdown(value.total),
+    last: normalizeTokenUsageBreakdown(value.last),
+    modelContextWindow: normalizeOptionalFiniteNumber(value.modelContextWindow)
+  };
 }
 
 export function defaultProjectSession() {
@@ -66,6 +158,16 @@ export function defaultProjectSession() {
     connectedThreadName: null,
     lastThreadChoices: [],
     lastThreadChoicesAt: null,
+    lastTokenUsage: null,
+    lastTokenUsageAt: null,
+    lastCompactedAt: null,
+    lastContextAlertAt: null,
+    lastContextAlertTokenUsageAt: null,
+    lastContextAlertPercent: null,
+    lastAutoCompactAt: null,
+    lastAutoCompactTokenUsageAt: null,
+    lastAutoCompactPercent: null,
+    pendingMission: null,
     lastErrorAt: null,
     lastError: null,
     queuedPrompts: []
@@ -79,6 +181,7 @@ export function defaultChatSession(phoneKey = null) {
     remoteJid: null,
     activeProject: DEFAULT_PROJECT_ALIAS,
     voiceReply: null,
+    markRepliesUnread: false,
     projects: {
       [DEFAULT_PROJECT_ALIAS]: defaultProjectSession()
     },
@@ -89,7 +192,11 @@ export function defaultChatSession(phoneKey = null) {
     lastInboundAt: null,
     lastInboundText: null,
     lastInboundType: null,
+    lastInboundMessage: null,
+    lastReplyMarkedUnreadAt: null,
+    lastReplyMarkedUnreadError: null,
     lastVoiceTranscriptAt: null,
+    lastVoiceTranscriptProvider: null,
     lastVoiceTranscriptModel: null,
     lastVoiceTranscriptConfidence: null,
     lastVoiceTranscriptMinConfidence: null
@@ -122,6 +229,24 @@ function normalizeProjectSession(value = {}) {
     ...defaultProjectSession(),
     ...value,
     lastThreadChoices: Array.isArray(value.lastThreadChoices) ? value.lastThreadChoices : [],
+    lastTokenUsage: normalizeThreadTokenUsage(value.lastTokenUsage),
+    lastTokenUsageAt:
+      typeof value.lastTokenUsageAt === "string" ? value.lastTokenUsageAt : null,
+    lastCompactedAt: typeof value.lastCompactedAt === "string" ? value.lastCompactedAt : null,
+    lastContextAlertAt:
+      typeof value.lastContextAlertAt === "string" ? value.lastContextAlertAt : null,
+    lastContextAlertTokenUsageAt:
+      typeof value.lastContextAlertTokenUsageAt === "string"
+        ? value.lastContextAlertTokenUsageAt
+        : null,
+    lastContextAlertPercent: normalizeOptionalFiniteNumber(value.lastContextAlertPercent),
+    lastAutoCompactAt:
+      typeof value.lastAutoCompactAt === "string" ? value.lastAutoCompactAt : null,
+    lastAutoCompactTokenUsageAt:
+      typeof value.lastAutoCompactTokenUsageAt === "string"
+        ? value.lastAutoCompactTokenUsageAt
+        : null,
+    lastAutoCompactPercent: normalizeOptionalFiniteNumber(value.lastAutoCompactPercent),
     queuedPrompts: normalizeQueuedPromptList(value.queuedPrompts)
   };
 }
@@ -167,6 +292,16 @@ function normalizeChatSession(value = {}, phoneKey = null) {
     phoneKey: phoneKey ?? value.phoneKey ?? null,
     activeProject,
     voiceReply: value.voiceReply ?? null,
+    markRepliesUnread: Boolean(value.markRepliesUnread),
+    lastInboundMessage: normalizeStoredMessageReference(value.lastInboundMessage),
+    lastReplyMarkedUnreadAt:
+      typeof value.lastReplyMarkedUnreadAt === "string"
+        ? value.lastReplyMarkedUnreadAt
+        : null,
+    lastReplyMarkedUnreadError:
+      typeof value.lastReplyMarkedUnreadError === "string"
+        ? value.lastReplyMarkedUnreadError
+        : null,
     projects,
     btw: {
       ...defaultChatSession().btw,

@@ -1,6 +1,8 @@
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
+import fs from "node:fs/promises";
 import { createRequire } from "node:module";
+import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { Boom } from "@hapi/boom";
@@ -13,12 +15,28 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import pino from "pino";
 
-import { authDir, credsFile, ensureRuntimeDirs, runtimeFile, storeFile } from "./paths.mjs";
+import {
+  authDir,
+  credsFile,
+  ensureRuntimeDirs,
+  mediaUploadsDir,
+  runtimeFile,
+  storeFile
+} from "./paths.mjs";
 import { WhatsAppStore } from "./store.mjs";
 
 const require = createRequire(import.meta.url);
 const QRCode = require("qrcode-terminal/vendor/QRCode");
 const QRErrorCorrectLevel = require("qrcode-terminal/vendor/QRCode/QRErrorCorrectLevel");
+const DEFAULT_FIXED_WA_VERSION = [2, 3000, 1033893291];
+const MEDIA_EXTENSION_BY_MIME = new Map([
+  ["image/jpeg", ".jpg"],
+  ["image/jpg", ".jpg"],
+  ["image/png", ".png"],
+  ["image/webp", ".webp"],
+  ["image/heic", ".heic"],
+  ["image/heif", ".heif"]
+]);
 
 const VERTICAL_BLOCKS = {
   "00": " ",
@@ -89,6 +107,24 @@ function createLogger(level = "warn") {
   );
 }
 
+function resolveWaVersion() {
+  if (process.env.WHATSAPP_USE_LATEST_VERSION === "1") {
+    return null;
+  }
+
+  const raw = process.env.WHATSAPP_FIXED_VERSION?.trim();
+  if (!raw) {
+    return DEFAULT_FIXED_WA_VERSION;
+  }
+
+  const parsed = raw
+    .split(".")
+    .map((part) => Number.parseInt(part, 10))
+    .filter((part) => Number.isFinite(part));
+
+  return parsed.length === 3 ? parsed : DEFAULT_FIXED_WA_VERSION;
+}
+
 function disconnectCode(error) {
   if (!error) {
     return null;
@@ -138,6 +174,65 @@ function payloadHasChat(payload, chatId) {
   }
 
   return (payload.messages ?? []).some((message) => message?.key?.remoteJid === chatId);
+}
+
+function safeFilePart(value, fallback = "item") {
+  const normalized = String(value ?? "")
+    .trim()
+    .replace(/[^a-z0-9._-]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  return normalized || fallback;
+}
+
+function extensionForMimeType(mimeType) {
+  const normalized = String(mimeType ?? "").split(";")[0].trim().toLowerCase();
+  return MEDIA_EXTENSION_BY_MIME.get(normalized) ?? ".bin";
+}
+
+function normalizeTimestamp(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  if (typeof value === "bigint") {
+    return Number(value);
+  }
+
+  if (typeof value === "object" && typeof value.toNumber === "function") {
+    return value.toNumber();
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeChatModifyMessage(message, fallbackChatId = null) {
+  const key = message?.key ?? null;
+  const id = typeof key?.id === "string" ? key.id.trim() : "";
+  const remoteJid =
+    typeof key?.remoteJid === "string" && key.remoteJid.trim()
+      ? key.remoteJid.trim()
+      : fallbackChatId;
+  const messageTimestamp = normalizeTimestamp(message?.messageTimestamp);
+
+  if (!id || !remoteJid || !messageTimestamp) {
+    return null;
+  }
+
+  return {
+    key: {
+      remoteJid,
+      id,
+      fromMe: Boolean(key?.fromMe),
+      ...(key?.participant ? { participant: key.participant } : {})
+    },
+    messageTimestamp
+  };
 }
 
 export class WhatsAppRuntime {
@@ -195,7 +290,8 @@ export class WhatsAppRuntime {
   async #startInternal({ printQrToTerminal }) {
     await this.initialize();
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
-    const { version } = await fetchLatestWaWebVersion();
+    const version =
+      resolveWaVersion() ?? (await fetchLatestWaWebVersion()).version;
 
     this.state.status = "connecting";
     this.state.hasCreds = this.hasSavedCreds();
@@ -374,6 +470,46 @@ export class WhatsAppRuntime {
       logger: this.logger,
       reuploadRequest: socket.updateMediaMessage
     });
+  }
+
+  async saveInboundMediaBuffer(buffer, {
+    phoneKey = "unknown",
+    messageId = null,
+    mimeType = "application/octet-stream",
+    kind = "media"
+  } = {}) {
+    await ensureRuntimeDirs();
+    const day = new Date().toISOString().slice(0, 10);
+    const dir = path.join(mediaUploadsDir, safeFilePart(phoneKey, "unknown"), day);
+    await fs.mkdir(dir, { recursive: true });
+
+    const fileName = [
+      Date.now(),
+      safeFilePart(kind, "media"),
+      safeFilePart(messageId, "message")
+    ].join("-") + extensionForMimeType(mimeType);
+    const filePath = path.join(dir, fileName);
+    await fs.writeFile(filePath, buffer);
+    return filePath;
+  }
+
+  async markChatUnread(chatId, lastMessages = []) {
+    const socket = await this.ensureConnected();
+    const normalizedMessages = (Array.isArray(lastMessages) ? lastMessages : [lastMessages])
+      .map((message) => normalizeChatModifyMessage(message, chatId))
+      .filter(Boolean);
+
+    if (!normalizedMessages.length) {
+      throw new Error("Cannot mark chat unread without a valid message reference.");
+    }
+
+    await socket.chatModify(
+      {
+        markRead: false,
+        lastMessages: normalizedMessages
+      },
+      chatId
+    );
   }
 
   async startAuthFlow(timeoutMs = 20_000) {

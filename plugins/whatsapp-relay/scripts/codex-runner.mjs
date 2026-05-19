@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 import {
   appServerPermissionParams,
@@ -9,6 +10,7 @@ import {
   permissionLevelConfig,
   resolvePermissionLevel
 } from "./controller-permissions.mjs";
+import { normalizeReasoningEffort } from "./controller-reasoning.mjs";
 
 const CLIENT_INFO = {
   name: "whatsapp-relay",
@@ -27,8 +29,7 @@ const OPT_OUT_NOTIFICATIONS = [
   "item/reasoning/summaryTextDelta",
   "item/reasoning/textDelta",
   "mcpServer/startupStatus/updated",
-  "thread/status/changed",
-  "thread/tokenUsage/updated"
+  "thread/status/changed"
 ];
 const VOICE_COMMAND_INTENT_MODEL = "gpt-5.4-mini";
 const VOICE_COMMAND_INTENT_REASONING_EFFORT = "low";
@@ -94,9 +95,10 @@ const PROJECT_INTENT_SCHEMA = {
   }
 };
 
-function configArgs({ model, profile, search, permissionLevel }) {
+function configArgs({ model, modelReasoningEffort, profile, search, permissionLevel }) {
   const args = ["app-server"];
   const cliPermissions = cliPermissionOverrides(permissionLevel);
+  const reasoningEffort = normalizeReasoningEffort(modelReasoningEffort);
 
   if (profile) {
     args.push("-c", `profile=${JSON.stringify(profile)}`);
@@ -104,6 +106,10 @@ function configArgs({ model, profile, search, permissionLevel }) {
 
   if (model) {
     args.push("-c", `model=${JSON.stringify(model)}`);
+  }
+
+  if (reasoningEffort) {
+    args.push("-c", `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`);
   }
 
   if (search) {
@@ -116,18 +122,115 @@ function configArgs({ model, profile, search, permissionLevel }) {
   return args;
 }
 
-function buildPromptInput(prompt) {
-  return [
+function normalizeTurnInputItem(item) {
+  if (item?.type === "localImage" && typeof item.path === "string" && item.path.trim()) {
+    return {
+      type: "localImage",
+      path: item.path.trim()
+    };
+  }
+
+  if (item?.type === "image" && typeof item.url === "string" && item.url.trim()) {
+    return {
+      type: "image",
+      url: item.url.trim()
+    };
+  }
+
+  return null;
+}
+
+export function buildPromptInput(prompt, inputItems = []) {
+  const input = [
     {
       type: "text",
       text: prompt,
       text_elements: []
     }
   ];
+
+  for (const item of inputItems) {
+    const normalized = normalizeTurnInputItem(item);
+    if (normalized) {
+      input.push(normalized);
+    }
+  }
+
+  return input;
 }
 
 function sanitizeIntentText(value) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeFiniteNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeOptionalFiniteNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeTokenUsageBreakdown(value = {}) {
+  return {
+    totalTokens: normalizeFiniteNumber(value.totalTokens),
+    inputTokens: normalizeFiniteNumber(value.inputTokens),
+    cachedInputTokens: normalizeFiniteNumber(value.cachedInputTokens),
+    outputTokens: normalizeFiniteNumber(value.outputTokens),
+    reasoningOutputTokens: normalizeFiniteNumber(value.reasoningOutputTokens)
+  };
+}
+
+function normalizeThreadTokenUsage(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  return {
+    total: normalizeTokenUsageBreakdown(value.total),
+    last: normalizeTokenUsageBreakdown(value.last),
+    modelContextWindow: normalizeOptionalFiniteNumber(value.modelContextWindow)
+  };
+}
+
+function turnTimestampToIso(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+
+  return new Date(parsed * 1000).toISOString();
+}
+
+function latestContextCompactionAt(thread) {
+  if (!thread || typeof thread !== "object" || !Array.isArray(thread.turns)) {
+    return null;
+  }
+
+  let latestIso = null;
+  let latestMs = 0;
+  for (const turn of thread.turns) {
+    if (!Array.isArray(turn?.items)) {
+      continue;
+    }
+
+    if (!turn.items.some((item) => item?.type === "contextCompaction")) {
+      continue;
+    }
+
+    const iso = turnTimestampToIso(turn.completedAt ?? turn.startedAt);
+    const ms = iso ? Date.parse(iso) : NaN;
+    if (!Number.isFinite(ms) || ms <= latestMs) {
+      continue;
+    }
+
+    latestMs = ms;
+    latestIso = iso;
+  }
+
+  return latestIso;
 }
 
 function normalizeFallbackPrompt(transcript, captureAllDirectMessages = true) {
@@ -379,6 +482,14 @@ export function normalizeCodexTurnNotification(
       }
       return null;
     case "item/completed":
+      if (params.item?.type === "contextCompaction" && params.turnId === activeTurnId) {
+        return {
+          type: "contextCompactionCompleted",
+          turnId: params.turnId,
+          threadId: resolvedThreadId,
+          compactedAt: new Date().toISOString()
+        };
+      }
       if (params.turnId === activeTurnId && params.item?.type === "agentMessage") {
         return {
           type: "agentMessageCompleted",
@@ -386,6 +497,30 @@ export function normalizeCodexTurnNotification(
           itemId: params.item.id,
           phase: params.item.phase ?? null,
           text: params.item.text ?? ""
+        };
+      }
+      return null;
+    case "thread/tokenUsage/updated":
+      if (
+        params.threadId === resolvedThreadId &&
+        (!activeTurnId || params.turnId === activeTurnId)
+      ) {
+        return {
+          type: "tokenUsageUpdated",
+          threadId: params.threadId,
+          turnId: params.turnId ?? null,
+          tokenUsage: normalizeThreadTokenUsage(params.tokenUsage)
+        };
+      }
+      return null;
+    case "thread/compacted":
+    case "contextCompacted":
+      if (params.threadId === resolvedThreadId) {
+        return {
+          type: "contextCompactionCompleted",
+          turnId: params.turnId ?? null,
+          threadId: params.threadId,
+          compactedAt: new Date().toISOString()
         };
       }
       return null;
@@ -452,28 +587,190 @@ function formatCloseError({ code, signal, stderr }) {
   );
 }
 
+function spawnCodexProcess(codexBin, args, options = {}) {
+  const command = String(codexBin ?? "").trim();
+  if (!command) {
+    throw new Error("Codex binary path cannot be empty.");
+  }
+
+  // Windows npm shims are .cmd files and require a shell to spawn correctly.
+  if (process.platform === "win32" && /\.(cmd|bat)$/i.test(command)) {
+    return spawn(command, args, {
+      ...options,
+      shell: true
+    });
+  }
+
+  return spawn(command, args, options);
+}
+
 async function runCodexExec({
   codexBin,
   args,
   cwd
 }) {
-  const child = spawn(codexBin, args, {
+  const child = spawnCodexProcess(codexBin, args, {
     cwd,
     stdio: ["ignore", "pipe", "pipe"]
   });
 
+  let stdout = "";
   let stderr = "";
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk.toString("utf8");
+  });
   child.stderr.on("data", (chunk) => {
     stderr += chunk.toString("utf8");
   });
-  child.stdout.on("data", () => {});
 
   return new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code, signal) => {
-      resolve({ code, signal, stderr });
+      resolve({ code, signal, stdout, stderr });
     });
   });
+}
+
+function formatExecFailure(result, label = "Codex exec") {
+  return (
+    result.stderr.trim() ||
+    (result.signal
+      ? `${label} exited with signal ${result.signal}.`
+      : `${label} exited with code ${result.code}.`)
+  );
+}
+
+function resolveCodexHome(codexHome = null) {
+  const explicitHome = String(codexHome ?? process.env.CODEX_HOME ?? "").trim();
+  return explicitHome || path.join(os.homedir(), ".codex");
+}
+
+export function parseCodexModelCatalog(raw) {
+  const parsed = JSON.parse(String(raw ?? "{}"));
+  const catalog = Array.isArray(parsed?.models) ? parsed.models : null;
+  if (!catalog) {
+    throw new Error("Codex debug models did not return a models array.");
+  }
+
+  return catalog.flatMap((entry) => {
+    const slug = String(entry?.slug ?? "").trim();
+    if (!slug) {
+      return [];
+    }
+
+    return [{
+      slug,
+      displayName: String(entry?.display_name ?? slug).trim() || slug,
+      description:
+        typeof entry?.description === "string" && entry.description.trim()
+          ? entry.description.trim()
+          : null,
+      visibility:
+        typeof entry?.visibility === "string" && entry.visibility.trim()
+          ? entry.visibility.trim()
+          : null,
+      defaultReasoningLevel:
+        typeof entry?.default_reasoning_level === "string" &&
+        entry.default_reasoning_level.trim()
+          ? entry.default_reasoning_level.trim()
+          : null,
+      upgradeModel:
+        typeof entry?.upgrade?.model === "string" && entry.upgrade.model.trim()
+          ? entry.upgrade.model.trim()
+          : null
+    }];
+  });
+}
+
+export async function listCodexModels({
+  codexBin,
+  workspace
+}) {
+  const result = await runCodexExec({
+    codexBin,
+    args: ["debug", "models"],
+    cwd: workspace
+  });
+
+  if (result.code !== 0) {
+    throw new Error(formatExecFailure(result, "Codex debug models"));
+  }
+
+  return parseCodexModelCatalog(result.stdout);
+}
+
+export function parseCodexConfigDefaults(raw) {
+  const defaults = {
+    model: null,
+    modelReasoningEffort: null,
+    profile: null
+  };
+  let insideSection = false;
+
+  for (const line of String(raw ?? "").split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+
+    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      insideSection = true;
+      continue;
+    }
+
+    if (insideSection) {
+      continue;
+    }
+
+    const match = trimmed.match(/^([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"$/u);
+    if (!match) {
+      continue;
+    }
+
+    const [, key, value] = match;
+    switch (key) {
+      case "model":
+        defaults.model = value || null;
+        break;
+      case "model_reasoning_effort":
+        defaults.modelReasoningEffort = value || null;
+        break;
+      case "profile":
+        defaults.profile = value || null;
+        break;
+      default:
+        break;
+    }
+  }
+
+  return defaults;
+}
+
+export async function readCodexConfigDefaults({
+  codexHome = null,
+  configPath = null
+} = {}) {
+  const resolvedPath = configPath
+    ? path.resolve(String(configPath))
+    : path.join(resolveCodexHome(codexHome), "config.toml");
+
+  try {
+    const raw = await fs.readFile(resolvedPath, "utf8");
+    return {
+      ...parseCodexConfigDefaults(raw),
+      path: resolvedPath
+    };
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return {
+        model: null,
+        modelReasoningEffort: null,
+        profile: null,
+        path: resolvedPath
+      };
+    }
+    throw error;
+  }
 }
 
 function validatePermissionRequirements(requirements, permissionLevel) {
@@ -530,6 +827,7 @@ function startAppServerClient({
   codexBin,
   workspace,
   model = null,
+  modelReasoningEffort = null,
   profile = null,
   search = false,
   permissionLevel = "read-only",
@@ -538,10 +836,11 @@ function startAppServerClient({
   onClose = null
 }) {
   const resolvedPermissionLevel = resolvePermissionLevel(permissionLevel);
-  const child = spawn(
+  const child = spawnCodexProcess(
     codexBin,
     configArgs({
       model,
+      modelReasoningEffort,
       profile,
       search,
       permissionLevel: resolvedPermissionLevel
@@ -780,6 +1079,170 @@ export async function listCodexThreads({
   }
 }
 
+export async function readCodexThread({
+  codexBin,
+  workspace,
+  threadId,
+  model = null,
+  profile = null,
+  search = false,
+  includeTurns = true
+}) {
+  if (!String(threadId ?? "").trim()) {
+    throw new Error("Codex thread id cannot be empty.");
+  }
+
+  const client = startAppServerClient({
+    codexBin,
+    workspace,
+    model,
+    profile,
+    search,
+    permissionLevel: "read-only"
+  });
+
+  try {
+    await client.request("initialize", {
+      clientInfo: CLIENT_INFO,
+      capabilities: {
+        experimentalApi: false,
+        optOutNotificationMethods: OPT_OUT_NOTIFICATIONS
+      }
+    });
+
+    const result = await client.request("thread/read", {
+      threadId,
+      includeTurns: Boolean(includeTurns)
+    });
+
+    return result.thread ?? null;
+  } finally {
+    await client.shutdown().catch(() => {});
+    await client.closed.catch(() => {});
+  }
+}
+
+export async function compactCodexThread({
+  codexBin,
+  workspace,
+  threadId,
+  model = null,
+  profile = null,
+  search = false,
+  timeoutMs = 90_000,
+  pollMs = 1_000
+}) {
+  if (!String(threadId ?? "").trim()) {
+    throw new Error("Codex thread id cannot be empty.");
+  }
+
+  let resolvedThreadId = threadId;
+  let observedCompactionAt = null;
+  const client = startAppServerClient({
+    codexBin,
+    workspace,
+    model,
+    profile,
+    search,
+    permissionLevel: "read-only",
+    onNotification(message) {
+      const normalized = normalizeCodexTurnNotification(message, {
+        activeTurnId: null,
+        resolvedThreadId
+      });
+      if (normalized?.type === "contextCompactionCompleted") {
+        observedCompactionAt = normalized.compactedAt ?? new Date().toISOString();
+      }
+    }
+  });
+
+  try {
+    await client.request("initialize", {
+      clientInfo: CLIENT_INFO,
+      capabilities: {
+        experimentalApi: false,
+        optOutNotificationMethods: OPT_OUT_NOTIFICATIONS
+      }
+    });
+
+    const permissionParams = appServerPermissionParams("read-only");
+    const resumeResult = await client.request("thread/resume", {
+      threadId,
+      cwd: workspace,
+      ...(model ? { model } : {}),
+      approvalPolicy: permissionParams.approvalPolicy,
+      sandboxPolicy: permissionParams.sandboxPolicy,
+      persistExtendedHistory: false
+    });
+    resolvedThreadId = resumeResult.thread?.id ?? threadId;
+
+    const beforeRead = await client
+      .request("thread/read", {
+        threadId: resolvedThreadId,
+        includeTurns: true
+      })
+      .catch(() => ({ thread: resumeResult.thread ?? null }));
+    const beforeCompactedAt = latestContextCompactionAt(beforeRead.thread);
+
+    // Native Codex compaction starts asynchronously and can take tens of seconds
+    // on large threads, so keep polling the persisted thread for completion.
+    await client.request("thread/compact/start", { threadId: resolvedThreadId });
+
+    let latestThread = beforeRead.thread ?? null;
+    const deadline = Date.now() + Math.max(500, timeoutMs);
+
+    while (Date.now() < deadline) {
+      await delay(Math.max(100, pollMs));
+
+      const readResult = await client
+        .request("thread/read", {
+          threadId: resolvedThreadId,
+          includeTurns: true
+        })
+        .catch(() => ({ thread: latestThread }));
+      latestThread = readResult.thread ?? latestThread;
+
+      const latestCompactedAt = latestContextCompactionAt(latestThread) ?? observedCompactionAt;
+      if (
+        latestCompactedAt &&
+        (!beforeCompactedAt || Date.parse(latestCompactedAt) > Date.parse(beforeCompactedAt))
+      ) {
+        return {
+          thread: latestThread,
+          lastCompactedAt: latestCompactedAt,
+          observed: true
+        };
+      }
+
+      if (observedCompactionAt) {
+        break;
+      }
+    }
+
+    const finalRead = await client
+      .request("thread/read", {
+        threadId: resolvedThreadId,
+        includeTurns: true
+      })
+      .catch(() => ({ thread: latestThread }));
+    latestThread = finalRead.thread ?? latestThread;
+
+    const lastCompactedAt = latestContextCompactionAt(latestThread) ?? observedCompactionAt;
+    const observed =
+      Boolean(lastCompactedAt) &&
+      (!beforeCompactedAt || Date.parse(lastCompactedAt) > Date.parse(beforeCompactedAt));
+
+    return {
+      thread: latestThread,
+      lastCompactedAt,
+      observed
+    };
+  } finally {
+    await client.shutdown().catch(() => {});
+    await client.closed.catch(() => {});
+  }
+}
+
 export async function classifyVoiceCommandIntent({
   codexBin,
   workspace,
@@ -830,12 +1293,7 @@ export async function classifyVoiceCommandIntent({
       cwd: workspace
     });
     if (result.code !== 0) {
-      throw new Error(
-        result.stderr.trim() ||
-          (result.signal
-            ? `Codex exec exited with signal ${result.signal}.`
-            : `Codex exec exited with code ${result.code}.`)
-      );
+      throw new Error(formatExecFailure(result));
     }
 
     const raw = await fs.readFile(outputPath, "utf8");
@@ -895,12 +1353,7 @@ export async function classifyProjectIntent({
       cwd: workspace
     });
     if (result.code !== 0) {
-      throw new Error(
-        result.stderr.trim() ||
-          (result.signal
-            ? `Codex exec exited with signal ${result.signal}.`
-            : `Codex exec exited with code ${result.code}.`)
-      );
+      throw new Error(formatExecFailure(result));
     }
 
     const raw = await fs.readFile(outputPath, "utf8");
@@ -914,9 +1367,11 @@ export function startCodexTurn({
   codexBin,
   workspace,
   prompt,
+  inputItems = [],
   threadId = null,
   threadName = null,
   model = null,
+  modelReasoningEffort = null,
   profile = null,
   search = false,
   permissionLevel = "workspace-write",
@@ -934,6 +1389,7 @@ export function startCodexTurn({
     codexBin,
     workspace,
     model,
+    modelReasoningEffort,
     profile,
     search,
     permissionLevel: resolvedPermissionLevel,
@@ -1021,6 +1477,10 @@ export function startCodexTurn({
         });
         return;
       }
+      case "tokenUsageUpdated":
+      case "contextCompactionCompleted":
+        onLifecycleEvent?.(event);
+        return;
       case "agentMessageCompleted":
         handleAgentMessage({
           id: event.itemId,
@@ -1155,7 +1615,7 @@ export function startCodexTurn({
 
     const turnResult = await client.request("turn/start", {
       threadId: resolvedThreadId,
-      input: buildPromptInput(prompt),
+      input: buildPromptInput(prompt, inputItems),
       cwd: workspace,
       ...(model ? { model } : {}),
       approvalPolicy: permissionParams.approvalPolicy,
