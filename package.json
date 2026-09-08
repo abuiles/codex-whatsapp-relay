@@ -21,7 +21,7 @@
   "dependencies": {
     "@hapi/boom": "^10.0.1",
     "@modelcontextprotocol/sdk": "^1.28.0",
-    "@whiskeysockets/baileys": "^7.0.0-rc.9",
+    "@whiskeysockets/baileys": "https://codeload.github.com/doryani-ai/Baileys/tar.gz/refs/heads/fix/companion-reg-refresh",
     "franc": "^6.2.0",
     "link-preview-js": "^3.2.0",
     "pino": "^9.9.4",
