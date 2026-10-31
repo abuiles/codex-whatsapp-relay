@@ -3651,7 +3651,7 @@ export class WhatsAppControllerBridge {
     const socket = await this.runtime.ensureConnected();
 
     for (const part of splitMessage(text)) {
-      const sent = await socket.sendMessage(chatId, { text: part });
+      const sent = await socket.sendMessage(chatId, { text: part, linkPreview: null });
       this.rememberOutgoingMessage(sent?.key?.id ?? null);
     }
   }
