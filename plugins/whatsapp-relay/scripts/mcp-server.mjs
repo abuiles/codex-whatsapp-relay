@@ -567,7 +567,7 @@ server.tool(
       }
 
       const socket = await runtime.ensureConnected();
-      await socket.sendMessage(chat.id, { text });
+      await socket.sendMessage(chat.id, { text, linkPreview: null });
       return textResult(`Sent message to ${chat.displayName} (${chat.id}).`);
     } catch (error) {
       return textResult(error.message, { isError: true });
