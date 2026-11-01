@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -137,6 +137,19 @@ const RECONNECT_MAX_MS = 60_000;
 const REPLACED_WINDOW_MS = 10 * 60_000;
 const MAX_REPLACEMENTS = 5;
 
+// Baileys never sets `registered` for a QR link; `account` (the signed device
+// identity) is written only when pairing succeeds. A pairing-code request
+// saves `me` before the phone confirms, so a file without `account` is an
+// unfinished link, not a session to reconnect.
+export function credsFileIsLinked(file) {
+  if (!existsSync(file)) return false;
+  try {
+    return Boolean(JSON.parse(readFileSync(file, "utf8")).account);
+  } catch {
+    return true;
+  }
+}
+
 export class WhatsAppRuntime {
   constructor({ logLevel = "warn", reconnectOnReplaced = false } = {}) {
     this.logger = createLogger(logLevel);
@@ -156,10 +169,11 @@ export class WhatsAppRuntime {
     this.replacedAt = [];
     this.state = {
       status: "idle",
-      hasCreds: existsSync(credsFile),
+      hasCreds: credsFileIsLinked(credsFile),
       user: null,
       lastQrAt: null,
       currentQrText: null,
+      pairingCode: null,
       lastDisconnect: null,
       receivedPendingNotifications: false,
       nextReconnectAt: null,
@@ -183,7 +197,7 @@ export class WhatsAppRuntime {
   }
 
   hasSavedCreds() {
-    return existsSync(credsFile);
+    return credsFileIsLinked(credsFile);
   }
 
   summary() {
@@ -283,6 +297,7 @@ export class WhatsAppRuntime {
 
     this.state.status = "connecting";
     this.state.currentQrText = null;
+    this.state.pairingCode = null;
     this.state.hasCreds = this.hasSavedCreds();
 
     const socket = makeWASocket({
@@ -411,6 +426,7 @@ export class WhatsAppRuntime {
         this.state.user = socket.user ?? null;
         this.state.lastDisconnect = null;
         this.state.currentQrText = null;
+        this.state.pairingCode = null;
         this.state.hasCreds = this.hasSavedCreds();
         this.store.updateMeta({
           lastConnection: {
@@ -423,12 +439,14 @@ export class WhatsAppRuntime {
       if (update.connection === "close") {
         this.state.receivedPendingNotifications = false;
         this.state.currentQrText = null;
+        this.state.pairingCode = null;
         const code = disconnectCode(update.lastDisconnect?.error);
         const label = disconnectLabel(code);
         this.state.status =
           code === DisconnectReason.loggedOut ? "logged_out" : "disconnected";
         if (code === DisconnectReason.loggedOut) {
           this.state.currentQrText = null;
+          this.state.pairingCode = null;
         }
         this.state.connectedSince = null;
         this.state.disconnectedSince ??= new Date().toISOString();
@@ -469,6 +487,7 @@ export class WhatsAppRuntime {
     } catch {}
     this.state.status = "idle";
     this.state.currentQrText = null;
+    this.state.pairingCode = null;
     await this.store.flush();
     this.closing = false;
   }
@@ -523,44 +542,35 @@ export class WhatsAppRuntime {
     });
   }
 
-  async startAuthFlow(timeoutMs = 20_000) {
-    if (this.state.status === "connected" && this.socket) {
-      return {
-        status: "connected",
-        user: this.socket.user ?? this.state.user,
-        qrText: null
-      };
+  // With a phone number the user links by typing an 8-character code on the
+  // phone (Linked Devices -> Link with phone number) instead of scanning a QR.
+  // The code can only be requested once the socket reaches registration,
+  // which Baileys signals with its first QR.
+  async startAuthFlow({ phoneNumber, timeoutMs = 20_000 } = {}) {
+    const phone = phoneNumber === undefined ? null : String(phoneNumber).replace(/\D/g, "");
+    if (phone !== null && (phone.length < 8 || phone.length > 15)) {
+      throw new Error("phoneNumber must be the linked account's international number with country code, e.g. +15551234567.");
     }
+    const connected = () => ({ status: "connected", user: this.socket?.user ?? this.state.user, qrText: null });
+    const pending = () => phone
+      ? { status: "awaiting_pairing_code", user: null, qrText: null, pairingCode: this.state.pairingCode.code }
+      : { status: "awaiting_qr_scan", user: null, qrText: this.state.currentQrText };
+    if (this.state.status === "connected" && this.socket) return connected();
 
-    if (this.state.status === "awaiting_qr_scan" && this.socket?.ws?.isOpen &&
-        this.state.currentQrText) {
-      return {
-        status: "awaiting_qr_scan",
-        user: null,
-        qrText: this.state.currentQrText
-      };
-    }
-
-    await this.start({ printQrToTerminal: false });
+    const live = this.state.status === "awaiting_qr_scan" && this.socket?.ws?.isOpen && this.state.currentQrText;
+    if (live && (!phone || this.state.pairingCode?.phone === phone)) return pending();
+    if (!live) await this.start({ printQrToTerminal: false });
 
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
-      if (this.state.status === "connected") {
-        return {
-          status: "connected",
-          user: this.socket?.user ?? this.state.user,
-          qrText: null
-        };
-      }
-
+      if (this.state.status === "connected") return connected();
       if (this.state.currentQrText) {
-        return {
-          status: "awaiting_qr_scan",
-          user: null,
-          qrText: this.state.currentQrText
-        };
+        if (phone && this.state.pairingCode?.phone !== phone) {
+          const code = await this.socket.requestPairingCode(phone);
+          this.state.pairingCode = { code, phone, requestedAt: new Date().toISOString() };
+        }
+        return pending();
       }
-
       await delay(250);
     }
 

@@ -21,7 +21,7 @@ Use this skill when the user wants to connect WhatsApp, inspect recent chats, re
 
 4. After auth succeeds, prefer the plugin's WhatsApp MCP tools for chat listing, history sync, message review, and sending replies.
 
-5. If the QR code expires, rerun `whatsapp_start_auth`.
+5. If the QR code expires, rerun `whatsapp_start_auth`. If scanning fails or the QR cannot be shown, call `whatsapp_start_auth` with the user's own `phoneNumber` and tell them to choose "Link with phone number instead" under Linked Devices -> Link a Device and type the returned code. Calling again with the same number returns the same code.
 
 6. If the user wants to control Codex from WhatsApp, set up the controller bridge:
 

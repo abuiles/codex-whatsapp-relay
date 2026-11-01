@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import vm from "node:vm";
 import { DisconnectReason, proto } from "@whiskeysockets/baileys";
-import { WhatsAppRuntime } from "./runtime.mjs";
+import { WhatsAppRuntime, credsFileIsLinked } from "./runtime.mjs";
 
 test("auth reuses a live QR but never returns a disconnected cached QR", async () => {
   const runtime = new WhatsAppRuntime({ logLevel: "silent" });
@@ -24,6 +26,30 @@ test("auth reuses a live QR but never returns a disconnected cached QR", async (
   assert.equal(starts, 1);
 });
 
+test("auth with a phone number returns a pairing code once the socket can register, and reuses it", async () => {
+  const runtime = new WhatsAppRuntime({ logLevel: "silent" });
+  const requested = [];
+  runtime.start = async () => {
+    runtime.socket = { ws: { isOpen: true }, requestPairingCode: async phone => { requested.push(phone); return `CODE${requested.length}XYZ`.slice(0, 8); } };
+    runtime.state.status = "awaiting_qr_scan";
+    runtime.state.currentQrText = "qr";
+  };
+  const first = await runtime.startAuthFlow({ phoneNumber: "+1 (555) 000-1234" });
+  assert.equal(first.status, "awaiting_pairing_code");
+  assert.equal(first.pairingCode, "CODE1XYZ");
+  assert.deepEqual(requested, ["15550001234"]);
+  // Asking again on the same live socket must not invalidate the code the user is typing.
+  assert.equal((await runtime.startAuthFlow({ phoneNumber: "15550001234" })).pairingCode, "CODE1XYZ");
+  assert.equal(requested.length, 1);
+  // A different number gets its own code.
+  assert.equal((await runtime.startAuthFlow({ phoneNumber: "+44 7700 900123" })).pairingCode, "CODE2XYZ");
+  assert.deepEqual(requested, ["15550001234", "447700900123"]);
+  await assert.rejects(runtime.startAuthFlow({ phoneNumber: "12" }), /country code/);
+  runtime.state.status = "connected";
+  assert.equal((await runtime.startAuthFlow({ phoneNumber: "15550001234" })).status, "connected");
+  assert.equal(requested.length, 2);
+});
+
 test("closed and replaced sockets cannot leave a usable stale QR", async () => {
   const source = await fs.readFile(new URL("runtime.mjs", import.meta.url), "utf8");
   const begin = source.indexOf('    socket.ev.on("connection.update", (update) => {');
@@ -31,7 +57,7 @@ test("closed and replaced sockets cannot leave a usable stale QR", async () => {
   const code = source.slice(begin, end);
   let handler;
   const socket = { ev: { on: (_, fn) => { handler = fn; } } };
-  const runtime = { socket, closing: true, state: { status: "awaiting_qr_scan", currentQrText: "stale" }, events: { emit() {} } };
+  const runtime = { socket, closing: true, state: { status: "awaiting_qr_scan", currentQrText: "stale", pairingCode: { code: "STALE123" } }, events: { emit() {} } };
   const context = { socket, DisconnectReason, disconnectCode: () => DisconnectReason.connectionLost,
     disconnectLabel: () => "connection_lost", printQrToTerminal: false };
   const harness = vm.runInNewContext(`class Harness {
@@ -44,6 +70,7 @@ test("closed and replaced sockets cannot leave a usable stale QR", async () => {
   harness;`, { ...context, runtime });
   handler({ connection: "close", lastDisconnect: { error: new Error("closed") } });
   assert.equal(runtime.state.currentQrText, null);
+  assert.equal(runtime.state.pairingCode, null);
   assert.equal(runtime.state.status, "disconnected");
   harness.socket = {};
   handler({ qr: "obsolete QR" });
@@ -106,4 +133,20 @@ test("every unexpected close, including 440, goes through the single backoff sch
   harness.closing = true;
   handler({ connection: "close", lastDisconnect: { error: { code: DisconnectReason.connectionLost } } });
   assert.deepEqual(scheduled, [DisconnectReason.connectionReplaced]);
+});
+
+test("an abandoned pairing-code attempt does not count as a linked account", async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "creds-"));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "creds.json");
+  assert.equal(credsFileIsLinked(file), false);
+  // requestPairingCode saves `me` and the code before the phone confirms.
+  await fs.writeFile(file, JSON.stringify({ me: { id: "15550001234@s.whatsapp.net" }, pairingCode: "ABCD1234", registered: false }));
+  assert.equal(credsFileIsLinked(file), false);
+  // Pairing success (QR or code) adds the signed device account.
+  await fs.writeFile(file, JSON.stringify({ me: { id: "15550001234:3@s.whatsapp.net" }, account: { details: "x" }, registered: false }));
+  assert.equal(credsFileIsLinked(file), true);
+  // A file caught mid-write keeps the old answer rather than looking logged out.
+  await fs.writeFile(file, "{\"me\":");
+  assert.equal(credsFileIsLinked(file), true);
 });

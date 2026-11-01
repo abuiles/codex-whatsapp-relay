@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — link with a pairing code
+
+- `whatsapp_start_auth` takes an optional `phoneNumber` and returns an 8-character pairing code to type on the phone (Linked Devices -> Link with phone number instead) when QR scanning fails. Repeated calls on the same attempt return the same code. `npm run whatsapp:auth -- --phone <number>` does the same in a terminal.
+- An abandoned pairing attempt no longer counts as a linked account: a session counts as linked only once its credentials hold the signed device `account`, which Baileys writes on pairing success.
+
+### Fixed — sent replies left chats unread
+
+- A message sent through the relay now marks its chat read, as replying does on the phone. Previously the relay cached its own send first, so WhatsApp's echo was treated as a duplicate and the reset never ran.
+
 ### Fixed — headless reliability
 
 - One runtime daemon now owns the live WhatsApp socket per data directory. Codex starts one MCP worker per thread, and each worker used to open its own linked-device socket; every send, download or sync replaced the others' connections (`connectionReplaced`), never reconnected, and left most workers serving a stale cache. Workers are now thin proxies over a private Unix socket and start the daemon on demand. `WHATSAPP_DAEMON=off` restores in-process mode.

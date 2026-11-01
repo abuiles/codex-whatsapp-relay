@@ -472,6 +472,12 @@ npm run whatsapp:controller
 npm run whatsapp:status
 ```
 
+If scanning the QR code fails, link with a pairing code instead: pass your own
+number to `whatsapp_start_auth` as `phoneNumber`, or run
+`npm run whatsapp:auth -- --phone +15551234567`. On the phone, open Linked
+Devices -> Link a Device -> Link with phone number instead, and type the
+8-character code.
+
 ### Optional final-send confirmations
 
 Codex supports per-tool approval policies. Enable confirmation for the relay's

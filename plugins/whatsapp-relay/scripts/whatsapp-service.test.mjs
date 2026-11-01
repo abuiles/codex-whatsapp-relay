@@ -228,3 +228,20 @@ test("recover skips server notices and asks the phone only for real undecryptabl
   assert.match(text(await service.call("whatsapp_recover_messages", {})), /nothing_to_recover/);
   assert.match(text(await service.call("whatsapp_recover_messages", { messageIds: ["3EB0AA"] })), /count: 1\n/);
 });
+
+test("start_auth with a phone number shows the pairing code and how to enter it", async t => {
+  const { service, runtime } = await fixture(t, { status: "idle" });
+  const calls = [];
+  runtime.startAuthFlow = async args => {
+    calls.push(args);
+    return args.phoneNumber
+      ? { status: "awaiting_pairing_code", pairingCode: "ABCD1234" }
+      : { status: "awaiting_qr_scan", qrText: "qr" };
+  };
+  const result = await service.call("whatsapp_start_auth", { phoneNumber: "+1 555 000 1234" });
+  assert.equal(result.isError, false);
+  assert.match(text(result), /pairing_code: ABCD-1234/);
+  assert.match(text(result), /Link with phone number instead/);
+  assert.deepEqual(calls, [{ phoneNumber: "+1 555 000 1234" }]);
+  assert.match(text(await service.call("whatsapp_start_auth", {})), /Scan this QR code/);
+});

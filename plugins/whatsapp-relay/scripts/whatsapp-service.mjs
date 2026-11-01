@@ -353,10 +353,12 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
   const tools = [
     {
       name: "whatsapp_start_auth",
-      description: "Start the local WhatsApp auth flow and return the current terminal-style QR code.",
-      input: {},
+      description: "Link this relay to WhatsApp. Returns a QR code to scan, or, with phoneNumber, an 8-character pairing code to type on the phone (useful when QR scanning fails or the QR cannot be shown).",
+      input: {
+        phoneNumber: z.string().min(1).optional().describe("The linked account's own number with country code, e.g. +15551234567: link with a pairing code instead of a QR")
+      },
       mutates: true,
-      async handler() {
+      async handler({ phoneNumber }) {
         if (mode === "cache_only") await liveSocket("Authentication");
         const bridge = await getBridgeState();
         if (bridge.ownsLiveSession) {
@@ -364,8 +366,16 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
         }
         const blocked = session.blockedReason?.();
         if (blocked) throw new Error(`Authentication is unavailable: ${blocked}`);
-        const result = await runtime.startAuthFlow();
+        const result = await runtime.startAuthFlow(phoneNumber ? { phoneNumber } : {});
         if (result.status === "connected") return textResult(`WhatsApp is already connected as ${result.user?.id ?? "unknown"}.`);
+        if (result.status === "awaiting_pairing_code") {
+          return textResult([
+            `pairing_code: ${result.pairingCode.slice(0, 4)}-${result.pairingCode.slice(4)}`,
+            "On the phone: WhatsApp -> Settings -> Linked Devices -> Link a Device -> Link with phone number instead, then type this code.",
+            "The code stays valid while this auth attempt is open; calling whatsapp_start_auth again with the same number returns the same code.",
+            "After entering it, call `whatsapp_auth_status` to confirm the session is connected."
+          ].join("\n"));
+        }
         return textResult([
           "Scan this QR code directly from the terminal or Codex output.", "", formatQrBlock(result.qrText), "",
           "WhatsApp -> Settings -> Linked Devices -> Link a Device",
