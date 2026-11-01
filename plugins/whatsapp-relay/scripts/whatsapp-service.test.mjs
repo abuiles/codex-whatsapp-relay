@@ -41,7 +41,7 @@ function fakeSocket() {
   };
 }
 
-async function fixture(t, { mode = "daemon", status = "connected", lastDisconnect = null, session } = {}) {
+async function fixture(t, { mode = "daemon", status = "connected", lastDisconnect = null, reconnectHeld = false, session } = {}) {
   const directory = await fs.mkdtemp(path.join(dataDir, "case-"));
   const store = new WhatsAppStore(path.join(directory, "store.json"));
   t.after(() => clearTimeout(store.pendingSave));
@@ -55,7 +55,7 @@ async function fixture(t, { mode = "daemon", status = "connected", lastDisconnec
   const runtime = {
     store,
     logger: { warn() {}, error() {} },
-    state: { status, lastDisconnect },
+    state: { status, lastDisconnect, reconnectHeld },
     historyRequests: { load: async () => {}, list: () => [] },
     summary: () => ({ status: runtime.state.status, hasCreds: true, recentChatCount: 2, lastDisconnect: runtime.state.lastDisconnect }),
     hasSavedCreds: () => true,
@@ -173,10 +173,15 @@ test("cache-only workers never open a socket and still answer read tools", async
   assert.equal(socket.sent.length, 0);
 });
 
-test("a replaced or released session blocks live tools with a clear next step", async t => {
-  const replaced = await fixture(t, { status: "disconnected", lastDisconnect: { code: DisconnectReason.connectionReplaced, at: "now" } });
+test("a single 440 reconnects, but a held or released session blocks live tools with a clear next step", async t => {
+  const lastDisconnect = { code: DisconnectReason.connectionReplaced, at: "now" };
+  const once = await fixture(t, { status: "disconnected", lastDisconnect });
+  await once.service.call("whatsapp_mark_read", { chatId: pn });
+  assert.equal(once.connects(), 1);
+
+  const replaced = await fixture(t, { status: "disconnected", lastDisconnect, reconnectHeld: true });
   const result = await replaced.service.call("whatsapp_send_message", { chatId: pn, text: "hi" });
-  assert.match(text(result), /replaced this linked-device session.*whatsapp_reconnect/s);
+  assert.match(text(result), /keeps replacing this linked-device session.*whatsapp_reconnect/s);
   assert.equal(replaced.connects(), 0);
 
   const released = await fixture(t, { session: { blockedReason: () => "held by pid 42" } });

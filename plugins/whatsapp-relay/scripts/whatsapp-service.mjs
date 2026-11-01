@@ -2,7 +2,7 @@
 // of the live WhatsApp socket) and the MCP proxy's in-process fallback.
 import fs from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
-import { DisconnectReason, proto } from "@whiskeysockets/baileys";
+import { proto } from "@whiskeysockets/baileys";
 import { z } from "zod";
 
 import { cacheStatusLines, missingHistoryHint } from "./cache-status.mjs";
@@ -169,8 +169,8 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
     // ensureConnected would otherwise open a fresh QR pairing socket.
     if (!runtime.hasSavedCreds()) throw new Error(`${action} needs an authenticated WhatsApp session. Call whatsapp_start_auth first.`);
     const last = runtime.state.lastDisconnect;
-    if (runtime.state.status === "disconnected" && last?.code === DisconnectReason.connectionReplaced) {
-      throw new Error(`${action} is unavailable: another client replaced this linked-device session at ${last.at}. Make sure no other relay process uses these credentials, then call whatsapp_reconnect.`);
+    if (runtime.state.reconnectHeld) {
+      throw new Error(`${action} is unavailable: another client keeps replacing this linked-device session (last at ${last?.at}). Make sure no other relay process uses these credentials, then call whatsapp_reconnect.`);
     }
     return runtime.ensureConnected();
   }
@@ -337,8 +337,9 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
         if (summary.currentQrText) lines.push("qr_ready: yes", "", "current_qr:", formatQrBlock(summary.currentQrText));
         const disconnect = summary.lastDisconnect ?? bridgeState.processStatus.process.whatsappLastDisconnect;
         if (disconnect?.label) lines.push(`last_disconnect: ${disconnect.label}`);
-        if (summary.lastDisconnect?.code === DisconnectReason.connectionReplaced && status === "disconnected") {
-          lines.push("next_step: another client replaced this session; check for stray relay processes, then call whatsapp_reconnect");
+        if (summary.nextReconnectAt) lines.push(`next_reconnect_at: ${summary.nextReconnectAt}`);
+        if (summary.reconnectHeld) {
+          lines.push("next_step: another client keeps replacing this session; check for stray relay processes, then call whatsapp_reconnect");
         }
         if (!summary.hasCreds) lines.push("next_step: call `whatsapp_start_auth` to get a QR code");
         return textResult(lines.join("\n"));

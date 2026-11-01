@@ -10,7 +10,6 @@ import { ControllerConfigStore } from "./controller-config.mjs";
 import { getControllerProcessStatus } from "./controller-process.mjs";
 import { ensureRuntimeDirs, runtimeDaemonLockFile, runtimeDaemonSocket, scriptsDir } from "./paths.mjs";
 import { WhatsAppRuntime } from "./runtime.mjs";
-import { DisconnectReason } from "@whiskeysockets/baileys";
 import { createWhatsAppService } from "./whatsapp-service.mjs";
 
 const WATCH_INTERVAL_MS = 5_000;
@@ -81,7 +80,7 @@ if (!acquireLock()) {
   process.exit(0);
 }
 
-const runtime = new WhatsAppRuntime({ logLevel: process.env.WHATSAPP_LOG_LEVEL ?? "warn" });
+const runtime = new WhatsAppRuntime({ logLevel: process.env.WHATSAPP_LOG_LEVEL ?? "warn", reconnectOnReplaced: true });
 const controllerConfigStore = new ControllerConfigStore();
 await runtime.initialize();
 
@@ -131,16 +130,17 @@ const service = createWhatsAppService({
   }
 });
 
+// A single 440 is retried by the runtime itself; only a repeated one (another
+// owner keeps taking the device) holds until an explicit whatsapp_reconnect.
 function canAutoConnect() {
-  const code = runtime.state.lastDisconnect?.code;
-  return runtime.hasSavedCreds() && !released &&
-    !["connected", "connecting", "awaiting_qr_scan"].includes(runtime.state.status) &&
-    !(runtime.state.status === "disconnected" && code === DisconnectReason.connectionReplaced) &&
-    runtime.state.status !== "logged_out";
+  return runtime.hasSavedCreds() && !released && !runtime.state.reconnectHeld &&
+    !["connected", "connecting", "awaiting_qr_scan", "logged_out"].includes(runtime.state.status);
 }
 
-async function autoConnect() {
-  if (!canAutoConnect() || await bridgeOwnsSession()) return;
+// The watcher respects the runtime's backoff; a tool call skips the wait,
+// because someone is asking for fresh data right now.
+async function autoConnect({ skipBackoff = false } = {}) {
+  if (!canAutoConnect() || (!skipBackoff && runtime.reconnectPending()) || await bridgeOwnsSession()) return;
   runtime.start().catch(error => console.error(`[${new Date().toISOString()}] auto-connect failed: ${error.message}`));
 }
 
@@ -164,6 +164,7 @@ async function handle(request) {
     case "call": {
       lastActivity = Date.now();
       inFlight += 1;
+      await autoConnect({ skipBackoff: true }).catch(() => {});
       try {
         return await service.call(request.params?.name, request.params?.args ?? {});
       } finally {

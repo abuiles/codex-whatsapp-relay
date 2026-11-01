@@ -132,8 +132,13 @@ function disconnectLabel(code) {
   }
 }
 
+const RECONNECT_BASE_MS = 1_500;
+const RECONNECT_MAX_MS = 60_000;
+const REPLACED_WINDOW_MS = 10 * 60_000;
+const MAX_REPLACEMENTS = 5;
+
 export class WhatsAppRuntime {
-  constructor({ logLevel = "warn" } = {}) {
+  constructor({ logLevel = "warn", reconnectOnReplaced = false } = {}) {
     this.logger = createLogger(logLevel);
     this.store = new WhatsAppStore(storeFile);
     this.historyRequests = new HistoryRequests(historyRequestsFile);
@@ -142,6 +147,12 @@ export class WhatsAppRuntime {
     this.startPromise = null;
     this.shouldRenderQr = false;
     this.closing = false;
+    // Bumped by every start/stop so a superseded #startInternal never opens a socket.
+    this.generation = 0;
+    this.reconnectTimer = null;
+    this.reconnectAttempts = 0;
+    this.reconnectOnReplaced = reconnectOnReplaced;
+    this.replacedAt = [];
     this.state = {
       status: "idle",
       hasCreds: existsSync(credsFile),
@@ -150,6 +161,8 @@ export class WhatsAppRuntime {
       currentQrText: null,
       lastDisconnect: null,
       receivedPendingNotifications: false,
+      nextReconnectAt: null,
+      reconnectHeld: false,
       authDir,
       runtimeFile
     };
@@ -178,24 +191,68 @@ export class WhatsAppRuntime {
   async start({ printQrToTerminal = false, force = false } = {}) {
     this.shouldRenderQr = printQrToTerminal;
 
-    if (this.startPromise && !force) {
-      return this.startPromise;
+    if (!force) {
+      if (this.startPromise) return this.startPromise;
+      // A socket that is still connecting has no open ws yet; starting another
+      // here would orphan it, and orphans later replace each other (440).
+      if (this.socket && ["connecting", "awaiting_qr_scan", "connected"].includes(this.state.status)) {
+        return this.socket;
+      }
     }
 
-    if (!force && this.socket?.ws?.isOpen &&
-        ["connecting", "awaiting_qr_scan", "connected"].includes(this.state.status)) {
-      return this.socket;
-    }
-
+    this.#clearReconnect();
     this.closing = false;
-    this.startPromise = this.#startInternal({ printQrToTerminal }).finally(() => {
-      this.startPromise = null;
+    const generation = ++this.generation;
+    const prior = this.startPromise;
+    const run = (async () => {
+      if (prior) await prior.catch(() => {});
+      return this.#startInternal({ printQrToTerminal, generation });
+    })();
+    const tracked = run.finally(() => {
+      if (this.startPromise === tracked) this.startPromise = null;
     });
-
-    return this.startPromise;
+    this.startPromise = tracked;
+    return tracked;
   }
 
-  async #startInternal({ printQrToTerminal }) {
+  #clearReconnect() {
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.state.nextReconnectAt = null;
+  }
+
+  reconnectPending() {
+    return Boolean(this.reconnectTimer);
+  }
+
+  // One pending reconnect at a time, with exponential backoff. A replaced
+  // session (440) only means another process used these creds; retry it a few
+  // times, then hold so two owners cannot ping-pong forever.
+  #scheduleReconnect(code) {
+    if (code === DisconnectReason.loggedOut) return;
+    if (code === DisconnectReason.connectionReplaced) {
+      const now = Date.now();
+      this.replacedAt = [...this.replacedAt.filter(at => now - at < REPLACED_WINDOW_MS), now];
+      if (!this.reconnectOnReplaced || this.replacedAt.length > MAX_REPLACEMENTS) {
+        this.state.reconnectHeld = true;
+        return;
+      }
+    }
+    this.#clearReconnect();
+    const delayMs = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** this.reconnectAttempts);
+    this.reconnectAttempts += 1;
+    this.state.nextReconnectAt = new Date(Date.now() + delayMs).toISOString();
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.state.nextReconnectAt = null;
+      this.start({ printQrToTerminal: false, force: true }).catch((error) => {
+        console.error("failed to reconnect WhatsApp runtime", error);
+        if (!this.closing && !this.reconnectTimer) this.#scheduleReconnect(DisconnectReason.connectionLost);
+      });
+    }, delayMs);
+  }
+
+  async #startInternal({ printQrToTerminal, generation }) {
     await this.initialize();
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
     this.store.recordJidMapping({ pn: state.creds.me?.id, lid: state.creds.me?.lid });
@@ -207,6 +264,15 @@ export class WhatsAppRuntime {
       if (typeof lidUser === "string") this.store.recordJidMapping({ pn, lid: `${lidUser}@lid` });
     }
     const { version } = await fetchLatestWaWebVersion();
+    if (generation !== this.generation) return this.socket;
+
+    // Never leave the previous socket alive: it would keep reconnecting under
+    // the same linked device and replace this one.
+    const previous = this.socket;
+    this.socket = null;
+    try {
+      previous?.end?.(undefined);
+    } catch {}
 
     this.state.status = "connecting";
     this.state.currentQrText = null;
@@ -322,6 +388,8 @@ export class WhatsAppRuntime {
 
       if (update.connection === "open") {
         this.state.status = "connected";
+        this.reconnectAttempts = 0;
+        this.state.reconnectHeld = false;
         this.state.user = socket.user ?? null;
         this.state.lastDisconnect = null;
         this.state.currentQrText = null;
@@ -351,17 +419,7 @@ export class WhatsAppRuntime {
         };
         this.state.user = code === DisconnectReason.loggedOut ? null : this.state.user;
 
-        if (
-          !this.closing &&
-          code !== DisconnectReason.loggedOut &&
-          code !== DisconnectReason.connectionReplaced
-        ) {
-          setTimeout(() => {
-            this.start({ printQrToTerminal: false, force: true }).catch((error) => {
-              console.error("failed to reconnect WhatsApp runtime", error);
-            });
-          }, 1500);
-        }
+        if (!this.closing) this.#scheduleReconnect(code);
       }
 
       this.events.emit("connection.update", update);
@@ -378,6 +436,12 @@ export class WhatsAppRuntime {
   // (the controller bridge or a QR flow) can take over the linked device.
   async stop() {
     this.closing = true;
+    this.generation += 1;
+    this.#clearReconnect();
+    // An explicit stop/reconnect clears the 440 hold and the backoff.
+    this.reconnectAttempts = 0;
+    this.replacedAt = [];
+    this.state.reconnectHeld = false;
     const socket = this.socket;
     this.socket = null;
     try {

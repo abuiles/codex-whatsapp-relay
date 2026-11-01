@@ -36,6 +36,7 @@ test("closed and replaced sockets cannot leave a usable stale QR", async () => {
     disconnectLabel: () => "connection_lost", printQrToTerminal: false };
   const harness = vm.runInNewContext(`class Harness {
     #renderQr(value) { return value; }
+    #scheduleReconnect() {}
     install() { ${code} }
   }
   const harness = Object.assign(new Harness(), runtime);
@@ -69,4 +70,40 @@ test("positive provider acknowledgements update status but errors and obsolete s
   runtime.socket = {};
   handler({ attrs: { from: "10000000000@s.whatsapp.net", id: "obsolete" } });
   assert.equal(updates.length, 2);
+});
+
+test("a socket that is still connecting is reused instead of orphaned", async () => {
+  const runtime = new WhatsAppRuntime({ logLevel: "silent" });
+  const connecting = { ws: { isOpen: false } };
+  runtime.socket = connecting;
+  runtime.state.status = "connecting";
+  runtime.initialize = async () => assert.fail("must not open a second socket");
+  assert.equal(await runtime.start(), connecting);
+  assert.equal(await runtime.start(), connecting);
+  await runtime.stop();
+  assert.equal(runtime.reconnectPending(), false);
+});
+
+test("every unexpected close, including 440, goes through the single backoff scheduler", async () => {
+  const source = await fs.readFile(new URL("runtime.mjs", import.meta.url), "utf8");
+  const begin = source.indexOf('    socket.ev.on("connection.update", (update) => {');
+  const end = source.indexOf('    socket.ev.on("messages.upsert", (payload)', begin);
+  const code = source.slice(begin, end);
+  const scheduled = [];
+  let handler;
+  const socket = { ev: { on: (_, fn) => { handler = fn; } } };
+  const runtime = { socket, closing: false, state: { status: "connected" }, events: { emit() {} } };
+  const harness = vm.runInNewContext(`class Harness {
+    #renderQr(value) { return value; }
+    #scheduleReconnect(code) { scheduled.push(code); }
+    install() { ${code} }
+  }
+  const harness = Object.assign(new Harness(), runtime);
+  harness.install();
+  harness;`, { socket, scheduled, runtime, DisconnectReason, printQrToTerminal: false,
+    disconnectCode: error => error.code, disconnectLabel: () => "x" });
+  handler({ connection: "close", lastDisconnect: { error: { code: DisconnectReason.connectionReplaced } } });
+  harness.closing = true;
+  handler({ connection: "close", lastDisconnect: { error: { code: DisconnectReason.connectionLost } } });
+  assert.deepEqual(scheduled, [DisconnectReason.connectionReplaced]);
 });
