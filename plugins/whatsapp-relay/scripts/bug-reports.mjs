@@ -17,8 +17,10 @@ const MAX_FIELD = 500;
 
 // Errors a handler throws on purpose are plain Errors ("Chat not found");
 // a TypeError or ReferenceError means the relay code itself is wrong.
+// Timeouts and aborts are the network, not the code.
+const NOT_BUGS = new Set(["Error", "ZodError", "AbortError", "TimeoutError", "DaemonUnavailableError"]);
 export function isInternalError(error) {
-  return error instanceof Error && error.name !== "Error" && error.name !== "ZodError";
+  return error instanceof Error && !NOT_BUGS.has(error.name) && !/ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|ENOTFOUND/.test(error.code ?? "");
 }
 
 export function redactArgs(value, key = "") {

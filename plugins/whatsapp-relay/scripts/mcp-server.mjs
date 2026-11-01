@@ -6,6 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 import { callTool, DaemonUnavailableError } from "./daemon-client.mjs";
+import { scriptsVersion } from "./paths.mjs";
 import { WhatsAppRuntime } from "./runtime.mjs";
 import { createWhatsAppService, SERVER_INSTRUCTIONS, textResult, TOOL_DEFINITIONS } from "./whatsapp-service.mjs";
 
@@ -29,7 +30,13 @@ function timeoutFor(name, args) {
   return 120_000;
 }
 
+let inFlight = 0;
 async function dispatch(tool, args) {
+  inFlight += 1;
+  try { return await dispatchNow(tool, args); } finally { inFlight -= 1; }
+}
+
+async function dispatchNow(tool, args) {
   if (!daemonEnabled) return (await getLocalService()).call(tool.name, args);
   try {
     return await callTool(tool.name, args, { mutates: tool.mutates, timeoutMs: timeoutFor(tool.name, args) });
@@ -48,7 +55,7 @@ for (const tool of TOOL_DEFINITIONS) {
 
 const transport = new StdioServerTransport();
 let reloading = false;
-process.on("SIGHUP", async () => {
+async function reload() {
   if (reloading) return;
   if (typeof process.execve !== "function") {
     console.error("In-place MCP reload requires a Node.js version with process.execve.");
@@ -66,6 +73,27 @@ process.on("SIGHUP", async () => {
     reloading = false;
     console.error("WhatsApp MCP reload failed", error.message);
   }
-});
+}
+process.on("SIGHUP", reload);
 await server.connect(transport);
 server.sendToolListChanged();
+
+// After a deploy, reload onto the new scripts so an open Codex thread gets the
+// new tool list (sent as tools/list_changed on start). Only once the scripts
+// have stopped changing (a checkout writes them over several seconds) and
+// while idle: no call in flight and nothing read from the host for a few
+// seconds, so no request is lost mid-read.
+const bootVersion = scriptsVersion();
+let seenVersion = bootVersion;
+let lastInput = Date.now();
+process.stdin.on("data", () => { lastInput = Date.now(); });
+if (process.env.WHATSAPP_MCP_AUTO_RELOAD !== "off" && typeof process.execve === "function") {
+  setInterval(() => {
+    let version;
+    try { version = scriptsVersion(); } catch { return; }
+    const settled = version === seenVersion;
+    seenVersion = version;
+    if (!settled || version === bootVersion || inFlight > 0 || Date.now() - lastInput < 3000) return;
+    reload();
+  }, Number(process.env.WHATSAPP_MCP_RELOAD_CHECK_MS) || 5000).unref();
+}

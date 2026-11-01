@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — app-state sync stuck on missing keys, stale tools after updates
+
+- Auth files are now written to a temp file and renamed into place. Baileys wrote them in place with only an in-process lock, so two relay processes could leave a key file with trailing bytes; it then read as missing and chat state (archive, pin, mute, read marks) stopped syncing. Torn files left by older versions are read back from their first complete JSON value.
+- When app-state sync needs a key the relay does not have, it asks the phone for it (an invisible device-to-device request, at most once per key every 10 minutes) instead of waiting for the phone to share it on its own. The reply resyncs the parked collections.
+- Open Codex threads pick up new and changed tools after an update: the MCP server reloads itself in place (same process, same stdio pipe) once the scripts have stopped changing and no call is in flight, then tells Codex the tool list changed. Set `WHATSAPP_MCP_AUTO_RELOAD=off` to disable.
+- Timeouts, aborts and connection errors are no longer filed as relay bug reports.
+
 ### Added — bug reports a coding agent can act on
 
 - `whatsapp_report_bug` lets Codex report a relay bug (tool, arguments, what went wrong) to `bug-reports.jsonl` in the data directory, so a coding agent watching the file can fix it without the user relaying it.

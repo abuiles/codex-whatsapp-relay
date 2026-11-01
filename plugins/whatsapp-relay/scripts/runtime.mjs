@@ -11,11 +11,11 @@ import makeWASocket, {
   fetchLatestWaWebVersion,
   generateMessageIDV2,
   jidNormalizedUser,
-  proto,
-  useMultiFileAuthState
+  proto
 } from "@whiskeysockets/baileys";
 import pino from "pino";
 
+import { AppStateKeyRequester, useAtomicMultiFileAuthState } from "./auth-state.mjs";
 import { authDir, credsFile, ensureRuntimeDirs, historyRequestsFile, runtimeFile, storeFile } from "./paths.mjs";
 import { WhatsAppStore } from "./store.mjs";
 import { HistoryRequests } from "./history-requests.mjs";
@@ -275,7 +275,12 @@ export class WhatsAppRuntime {
 
   async #startInternal({ printQrToTerminal, generation }) {
     await this.initialize();
-    const { state, saveCreds } = await useMultiFileAuthState(authDir);
+    this.keyRequester ??= new AppStateKeyRequester({ getSocket: () => this.socket, logger: this.logger });
+    const { state, saveCreds } = await useAtomicMultiFileAuthState(authDir, {
+      onMissingKeys: (type, ids) => {
+        if (type === "app-state-sync-key" && this.state.status === "connected") this.keyRequester.request(ids);
+      }
+    });
     this.store.recordJidMapping({ pn: state.creds.me?.id, lid: state.creds.me?.lid });
     // Recover cached mappings without network lookups or a second WhatsApp socket.
     const phoneJids = Object.keys(this.store.data.chats).filter(id => id.endsWith("@s.whatsapp.net"));

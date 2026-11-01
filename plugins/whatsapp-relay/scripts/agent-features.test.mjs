@@ -538,6 +538,15 @@ test("a crashing tool files a redacted bug report once; handler errors do not", 
   assert.match(report.stack, /at /);
 });
 
+test("timeouts and connection errors are not filed as relay bugs", async () => {
+  const { isInternalError } = await import("./bug-reports.mjs");
+  assert.equal(isInternalError(new TypeError("x")), true);
+  assert.equal(isInternalError(new Error("Chat not found")), false);
+  assert.equal(isInternalError(Object.assign(new Error("t"), { name: "TimeoutError" })), false);
+  assert.equal(isInternalError(new DOMException("aborted", "AbortError")), false);
+  assert.equal(isInternalError(Object.assign(new TypeError("fetch failed"), { code: "ECONNRESET" })), false);
+});
+
 test("whatsapp_report_bug stores what the agent saw without message text", async t => {
   const { service, directory } = await fixture(t);
   const filed = await service.call("whatsapp_report_bug", { tool: "whatsapp_send_message", problem: "returned success but no message_id",

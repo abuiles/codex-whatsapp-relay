@@ -422,6 +422,12 @@ ten idle minutes when no credentials exist. If it cannot be reached, workers
 answer read-only tools from the cache (`runtime_mode: cache_only`) and refuse to
 send. Set `WHATSAPP_DAEMON=off` to keep the previous in-process behaviour.
 
+Workers reload themselves in place when the scripts change (same process, so
+the thread keeps its connection) and tell Codex the tool list changed, so open
+threads see new tools without a restart. `WHATSAPP_MCP_AUTO_RELOAD=off` turns
+this off. Auth files are written atomically, and when chat-state sync is
+missing a key the daemon asks your phone for it.
+
 Beyond chat listing, reading and sending, the MCP covers what an agent would
 otherwise need the WhatsApp UI for:
 

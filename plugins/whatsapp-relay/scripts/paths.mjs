@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -49,3 +50,13 @@ export const alertsFile = path.join(dataDir, "alerts.jsonl");
 export const scheduledFile = path.join(dataDir, "scheduled-messages.json");
 export const mediaTextDir = path.join(dataDir, "downloads");
 export const bugReportsFile = path.join(dataDir, "bug-reports.jsonl");
+
+// Newest mtime among the relay scripts. The daemon and the MCP workers compare
+// it with the value at boot to notice a deploy and restart onto the new code.
+export function scriptsVersion() {
+  let latest = 0;
+  for (const name of fsSync.readdirSync(scriptDir)) {
+    if (name.endsWith(".mjs")) latest = Math.max(latest, fsSync.statSync(path.join(scriptDir, name)).mtimeMs);
+  }
+  return latest;
+}

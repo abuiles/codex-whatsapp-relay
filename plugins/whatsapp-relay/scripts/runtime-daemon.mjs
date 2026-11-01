@@ -8,7 +8,7 @@ import path from "node:path";
 
 import { ControllerConfigStore } from "./controller-config.mjs";
 import { getControllerProcessStatus } from "./controller-process.mjs";
-import { ensureRuntimeDirs, runtimeDaemonLockFile, runtimeDaemonSocket, scriptsDir } from "./paths.mjs";
+import { ensureRuntimeDirs, runtimeDaemonLockFile, runtimeDaemonSocket, scriptsVersion } from "./paths.mjs";
 import { WhatsAppRuntime } from "./runtime.mjs";
 import { ScheduledStore } from "./scheduler.mjs";
 import { AlertEngine, WatchStore } from "./watch-rules.mjs";
@@ -66,14 +66,6 @@ function acquireLock() {
   } finally {
     fs.rmSync(draft, { force: true });
   }
-}
-
-function scriptsVersion() {
-  let latest = 0;
-  for (const name of fs.readdirSync(scriptsDir)) {
-    if (name.endsWith(".mjs")) latest = Math.max(latest, fs.statSync(path.join(scriptsDir, name)).mtimeMs);
-  }
-  return latest;
 }
 
 await ensureRuntimeDirs();
