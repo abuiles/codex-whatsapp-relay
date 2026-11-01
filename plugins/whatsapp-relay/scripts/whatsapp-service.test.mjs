@@ -216,11 +216,15 @@ test("whatsapp_inbox groups new arrivals by chat and hands back a cursor; stale 
 test("recover skips server notices and asks the phone only for real undecryptable messages", async t => {
   const { service, socket, store } = await fixture(t);
   const now = Math.floor(Date.now() / 1000);
-  socket.requestPlaceholderResend = async key => { socket.sent.push({ resend: key.id }); };
+  socket.requestPlaceholderResend = async (key, msgData) => { socket.sent.push({ resend: key.id, msgData }); };
   store.ingestMessage({ key: { id: "3EB0AA", remoteJid: group, fromMe: false, participant: pn }, messageTimestamp: now, messageStubType: 2 });
   store.data.messages[group].push({ id: "2491793518", chatId: group, fromMe: false, timestamp: now, text: "", messageType: "unknown" });
   assert.match(text(await service.call("whatsapp_read_messages", { chatId: group })), /\[system notice: /);
   const result = text(await service.call("whatsapp_recover_messages", {}));
   assert.match(result, /count: 1\n/);
   assert.deepEqual(socket.sent.map(s => s.resend), ["3EB0AA"]);
+  // Baileys rebuilds the resent message on msgData, so it needs the key.
+  assert.equal(socket.sent[0].msgData.key.id, "3EB0AA");
+  assert.match(text(await service.call("whatsapp_recover_messages", {})), /nothing_to_recover/);
+  assert.match(text(await service.call("whatsapp_recover_messages", { messageIds: ["3EB0AA"] })), /count: 1\n/);
 });

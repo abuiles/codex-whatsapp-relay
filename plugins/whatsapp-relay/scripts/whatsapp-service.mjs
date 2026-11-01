@@ -25,6 +25,8 @@ export const FEATURES = [
 const CHAT_ID_PATTERN = /^(?:\d{7,15}@s\.whatsapp\.net|\d+@lid|\d+(?:-\d+)?@g\.us)$/;
 const WAIT_MAX_SECONDS = 55;
 const RECOVER_MAX_AGE_SECONDS = 14 * 24 * 3600; // Baileys' PLACEHOLDER_MAX_AGE_SECONDS
+// Let repeated recover calls move on to the next batch instead of re-asking.
+const RECOVER_RETRY_AFTER_MS = 10 * 60 * 1000;
 // Freshness lines every read result repeats, so a stale cache is never mistaken for live.
 const FRESHNESS_LINE = /^(connection:|sync_state:|live_session_owner:|connected_since:|stale_since:|next_reconnect_at:|freshness_warning:|next_step:)/;
 
@@ -153,6 +155,7 @@ const mediaInput = {
  */
 export function createWhatsAppService({ runtime, mode = "daemon", session = {}, controllerConfigStore = new ControllerConfigStore() }) {
   const store = runtime.store;
+  const recoverRequestedAt = new Map();
 
   async function getBridgeState() {
     const [config, processStatus] = await Promise.all([controllerConfigStore.load(), getControllerProcessStatus()]);
@@ -650,14 +653,19 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
         const candidates = (chat ? [chat.id] : Object.keys(store.data.messages))
           .flatMap(id => store.data.messages[id] ?? [])
           .filter(m => !m.fromMe && !m.text && !m.media && !m.rawMessage && (m.timestamp ?? 0) >= cutoff &&
+            (wanted || !(Date.now() - (recoverRequestedAt.get(m.id) ?? 0) < RECOVER_RETRY_AFTER_MS)) &&
             (m.messageType === "undecryptable" || (m.messageType === "unknown" && !isServerNoticeId(m.id))) && (!wanted || wanted.has(m.id)))
           .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
           .slice(0, limit);
-        if (!candidates.length) return textResult("status: nothing_to_recover\ncount: 0");
+        if (!candidates.length) return textResult(`status: nothing_to_recover\ncount: 0\nnext_step: messages requested in the last ${RECOVER_RETRY_AFTER_MS / 60000} minutes are skipped; pass messageIds to ask again`);
         const socket = await liveSocket("Recovering messages");
-        const results = await Promise.allSettled(candidates.map(m => socket.requestPlaceholderResend(
-          { remoteJid: m.chatId, id: m.id, fromMe: false, participant: m.participant ?? undefined },
-          { messageTimestamp: m.timestamp, pushName: m.pushName ?? undefined })));
+        // Baileys rebuilds the resent message on top of msgData, so it must
+        // be the whole original message (key included), not just metadata.
+        const results = await Promise.allSettled(candidates.map(m => {
+          recoverRequestedAt.set(m.id, Date.now());
+          const key = { remoteJid: m.chatId, id: m.id, fromMe: false, participant: m.participant ?? undefined };
+          return socket.requestPlaceholderResend(key, { key, messageTimestamp: m.timestamp, pushName: m.pushName ?? undefined });
+        }));
         return textResult([
           "status: requested",
           `count: ${candidates.length}`,
