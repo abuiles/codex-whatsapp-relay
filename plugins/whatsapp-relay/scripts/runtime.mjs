@@ -163,6 +163,11 @@ export class WhatsAppRuntime {
       receivedPendingNotifications: false,
       nextReconnectAt: null,
       reconnectHeld: false,
+      // Watchdog: when the live socket opened or was lost, and how many
+      // automatic reconnects this process has scheduled.
+      connectedSince: null,
+      disconnectedSince: null,
+      reconnectCount: 0,
       authDir,
       runtimeFile
     };
@@ -241,6 +246,7 @@ export class WhatsAppRuntime {
     this.#clearReconnect();
     const delayMs = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** this.reconnectAttempts);
     this.reconnectAttempts += 1;
+    this.state.reconnectCount += 1;
     this.state.nextReconnectAt = new Date(Date.now() + delayMs).toISOString();
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
@@ -346,7 +352,8 @@ export class WhatsAppRuntime {
       if (socket !== this.socket) return;
       this.store.updateMeta({ lastMessageEventAt: new Date().toISOString() });
       for (const message of messages ?? []) {
-        this.store.ingestMessage(message, { incrementUnread: type === "notify" });
+        // "append" is the offline backlog delivered on reconnect: still new to the user.
+        this.store.ingestMessage(message, { incrementUnread: type === "notify" || type === "append" });
       }
     });
 
@@ -388,6 +395,8 @@ export class WhatsAppRuntime {
 
       if (update.connection === "open") {
         this.state.status = "connected";
+        this.state.connectedSince = new Date().toISOString();
+        this.state.disconnectedSince = null;
         this.reconnectAttempts = 0;
         this.state.reconnectHeld = false;
         this.state.user = socket.user ?? null;
@@ -412,6 +421,8 @@ export class WhatsAppRuntime {
         if (code === DisconnectReason.loggedOut) {
           this.state.currentQrText = null;
         }
+        this.state.connectedSince = null;
+        this.state.disconnectedSince ??= new Date().toISOString();
         this.state.lastDisconnect = {
           code,
           label,

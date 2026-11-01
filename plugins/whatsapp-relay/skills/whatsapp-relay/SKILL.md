@@ -60,7 +60,10 @@ Use these tools instead of opening WhatsApp Web, the desktop app or a browser:
 | Find a chat, group or contact by name or phone number | `whatsapp_list_chats` (`query`, `kind`) |
 | Find a message by its content | `whatsapp_search_messages` |
 | Read a conversation | `whatsapp_read_messages` |
-| Wait for a reply or new messages | `whatsapp_wait_for_messages` (pass back `next_since_timestamp`) |
+| What is new / unread across chats | `whatsapp_inbox` (pass back `next_cursor`; `waitSeconds` to long-poll) |
+| Wait for a reply in one chat | `whatsapp_wait_for_messages` (pass back `next_since_timestamp`) |
+| Message shows `[undecryptable]` | `whatsapp_recover_messages` (asks your own phone to resend) |
+| Read says `freshness_warning` | call `whatsapp_reconnect`; newer messages may be missing |
 | Message someone who is not in the cache | `whatsapp_check_number`, then `whatsapp_send_message` with `phoneNumber` |
 | Reply to a specific message | `whatsapp_send_message` with `replyToMessageId` |
 | React, edit, delete, forward | `whatsapp_react`, `whatsapp_edit_message`, `whatsapp_delete_message`, `whatsapp_forward_message` |

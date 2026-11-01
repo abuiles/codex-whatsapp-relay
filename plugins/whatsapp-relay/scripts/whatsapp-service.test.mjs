@@ -195,3 +195,20 @@ test("argument validation errors are reported, not thrown", async t => {
   assert.equal(result.isError, true);
   assert.match(text(result), /Invalid arguments: latitude/);
 });
+
+test("whatsapp_inbox groups new arrivals by chat and hands back a cursor; stale reads warn", async t => {
+  const { service, store } = await fixture(t, { status: "disconnected" });
+  store.ingestMessage(incoming("g1", group, 20, "Group news"));
+  store.ingestMessage({ key: { id: "x1", remoteJid: group, fromMe: false }, messageTimestamp: 21, messageStubType: 2 });
+  const snapshot = text(await service.call("whatsapp_inbox", {}));
+  assert.match(snapshot, /mode: unread_snapshot/);
+  assert.match(snapshot, /## Synthetic group \(.*\) unread=2/);
+  assert.match(snapshot, /\[undecryptable: .*whatsapp_recover_messages/);
+  assert.match(snapshot, /freshness_warning: not connected/);
+  const cursor = Number(snapshot.match(/next_cursor: (\d+)/)[1]);
+  store.ingestMessage(incoming("late", pn, 5, "sent while offline"));
+  const next = text(await service.call("whatsapp_inbox", { cursor }));
+  assert.match(next, /count: 1\n/);
+  assert.match(next, /late/);
+  assert.doesNotMatch(next, /g1/);
+});

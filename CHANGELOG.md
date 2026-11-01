@@ -16,6 +16,11 @@ All notable changes to this project will be documented in this file.
 ### Added — features that work without the WhatsApp UI
 
 - `whatsapp_search_messages` (full-text across chats), `whatsapp_wait_for_messages` (long-poll for new messages with a cursor).
+- `whatsapp_inbox`: everything new across chats, grouped by chat, with an arrival-order cursor that includes offline backlog.
+- `whatsapp_recover_messages`: asks your own phone to resend messages this device could not decrypt.
+- Unread counts now include offline backlog, ignore Baileys' per-batch deltas, reset when you reply or read elsewhere, and track "marked unread" separately. Existing caches are repaired once on load.
+- Undecryptable and system messages are labelled instead of shown blank.
+- Every read reports `connected_since`, or `stale_since` with a `freshness_warning` when it is not live. `whatsapp_auth_status` shows the reconnect count.
 - Send to a `phoneNumber` (verified on WhatsApp first) and reply with `replyToMessageId` in `whatsapp_send_message` / `whatsapp_send_media`.
 - `whatsapp_react`, `whatsapp_edit_message`, `whatsapp_delete_message`, `whatsapp_forward_message`, `whatsapp_mark_read`, `whatsapp_send_poll`, `whatsapp_send_location`.
 - `whatsapp_check_number`, `whatsapp_contact_info`, `whatsapp_group_info` (participants, admins; lists all groups without arguments).

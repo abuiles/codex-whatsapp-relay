@@ -18,11 +18,15 @@ import { normalizeTtsProvider } from "./voice-replier.mjs";
 export const FEATURES = [
   "send_message_media_v1", "read_message_media_v1", "in_place_reload_v1", "history_request_journal_v1",
   "receipt_evidence_v1", "single_socket_daemon_v1", "message_search_v1", "wait_for_messages_v1",
-  "phone_number_recipients_v1", "reply_react_edit_delete_forward_v1", "polls_locations_v1", "group_info_v1"
+  "phone_number_recipients_v1", "reply_react_edit_delete_forward_v1", "polls_locations_v1", "group_info_v1",
+  "unread_model_v1", "inbox_cursor_v1", "recover_messages_v1", "freshness_watchdog_v1"
 ];
 
 const CHAT_ID_PATTERN = /^(?:\d{7,15}@s\.whatsapp\.net|\d+@lid|\d+(?:-\d+)?@g\.us)$/;
 const WAIT_MAX_SECONDS = 55;
+const RECOVER_MAX_AGE_SECONDS = 14 * 24 * 3600; // Baileys' PLACEHOLDER_MAX_AGE_SECONDS
+// Freshness lines every read result repeats, so a stale cache is never mistaken for live.
+const FRESHNESS_LINE = /^(connection:|sync_state:|live_session_owner:|connected_since:|stale_since:|next_reconnect_at:|freshness_warning:|next_step:)/;
 
 export function textResult(text, { isError = false } = {}) {
   return { content: [{ type: "text", text }], isError };
@@ -48,6 +52,7 @@ function chatSummary(chat) {
     `kind=${chat.cacheEntryKind ?? "cached_chat"}`,
     `cached_messages=${chat.cachedMessageCount ?? "unknown"}`,
     `  unread=${chat.unreadCount ?? 0}`,
+    chat.markedUnread ? "marked_unread=yes" : null,
     stamp ? `last=${new Date(stamp * 1000).toISOString()}` : null,
     chat.lastMessageText ? `text=${oneLine(chat.lastMessageText, 120)}` : null
   ].filter(Boolean).join(" ");
@@ -61,7 +66,14 @@ export function messageSummary(message, { withChat = false } = {}) {
   const reply = message.replyTo ? ` reply_to=${message.replyTo}` : "";
   const edited = message.editedAt ? " edited=yes" : "";
   const reactions = message.reactions ? ` reactions=${JSON.stringify(message.reactions)}` : "";
-  return `- [${formatTimestamp(message.timestamp)}] id=${message.id}${where} status=${proto.WebMessageInfo.Status[message.deliveryStatus] ?? "unknown"} ${author}: ${message.text || `[${message.messageType}]`}${media}${reply}${edited}${reactions}${receipts}`;
+  return `- [${formatTimestamp(message.timestamp)}] id=${message.id}${where} status=${proto.WebMessageInfo.Status[message.deliveryStatus] ?? "unknown"} ${author}: ${messageBody(message)}${media}${reply}${edited}${reactions}${receipts}`;
+}
+
+function messageBody(message) {
+  if (message.text) return message.text;
+  if (message.messageType === "undecryptable") return "[undecryptable: not decrypted on this device yet; whatsapp_recover_messages asks your phone to resend it]";
+  if (message.messageType === "unknown" && !message.media) return "[unavailable: no content was cached for this message]";
+  return `[${message.messageType}]`;
 }
 
 function controllerSummaryLines(config, processStatus) {
@@ -338,6 +350,9 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
         const disconnect = summary.lastDisconnect ?? bridgeState.processStatus.process.whatsappLastDisconnect;
         if (disconnect?.label) lines.push(`last_disconnect: ${disconnect.label}`);
         if (summary.nextReconnectAt) lines.push(`next_reconnect_at: ${summary.nextReconnectAt}`);
+        if (summary.connectedSince) lines.push(`connected_since: ${summary.connectedSince}`);
+        if (summary.disconnectedSince) lines.push(`disconnected_since: ${summary.disconnectedSince}`);
+        lines.push(`reconnects_this_process: ${summary.reconnectCount ?? 0}`);
         if (summary.reconnectHeld) {
           lines.push("next_step: another client keeps replacing this session; check for stray relay processes, then call whatsapp_reconnect");
         }
@@ -537,7 +552,7 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
     },
     {
       name: "whatsapp_wait_for_messages",
-      description: `Wait for new incoming messages (long-poll, up to ${WAIT_MAX_SECONDS}s) after a cursor. Returns messages oldest first plus next_since_timestamp to pass to the next call. Use instead of polling the UI.`,
+      description: `Wait for new incoming messages by message timestamp (long-poll, up to ${WAIT_MAX_SECONDS}s). Offline backlog keeps its original timestamps and can fall before the cursor, so prefer whatsapp_inbox for "everything new".`,
       input: {
         sinceTimestamp: z.number().int().min(0).optional().describe("Unix seconds cursor; defaults to now"),
         ...chatTarget,
@@ -560,11 +575,87 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
         }
         const next = messages.length ? Math.max(...messages.map(m => m.timestamp ?? cursor)) : cursor;
         return textResult([
-          ...(await freshness()).filter(line => /^(connection:|sync_state:|live_session_owner:|next_step:)/.test(line)),
+          ...(await freshness()).filter(line => FRESHNESS_LINE.test(line)),
           `timed_out: ${messages.length ? "no" : "yes"}`,
           `count: ${messages.length}`,
           `next_since_timestamp: ${next}`,
           ...messages.map(m => messageSummary(m, { withChat: true }))
+        ].join("\n"));
+      }
+    },
+    {
+      name: "whatsapp_inbox",
+      description: `Everything new across all chats, grouped by chat. Without a cursor: each unread chat's unread messages. With the cursor from the previous call: every message that arrived since, including offline backlog with old timestamps. Optional long-poll (waitSeconds, up to ${WAIT_MAX_SECONDS}s) when nothing is new. Reading does not mark anything read.`,
+      input: {
+        cursor: z.number().int().min(0).optional().describe("next_cursor from the previous whatsapp_inbox call"),
+        ...chatTarget,
+        includeFromMe: z.boolean().optional(),
+        waitSeconds: z.number().int().min(0).max(WAIT_MAX_SECONDS).optional(),
+        limit: z.number().int().min(1).max(200).optional()
+      },
+      mutates: false,
+      async handler({ cursor, chatId, chatName, includeFromMe = false, waitSeconds = 0, limit = 100 }) {
+        await refreshCache();
+        const chat = chatId || chatName ? resolveChatOrError({ chatId, chatName }) : null;
+        const deadline = Date.now() + waitSeconds * 1000;
+        let result;
+        for (;;) {
+          result = store.inbox({ cursor, chatId: chat?.id, includeFromMe, limit });
+          if (result.messages.length || Date.now() >= deadline) break;
+          await delay(Math.min(1000, Math.max(0, deadline - Date.now())));
+          await refreshCache();
+        }
+        const byChat = new Map();
+        for (const message of result.messages) {
+          if (!byChat.has(message.chatId)) byChat.set(message.chatId, []);
+          byChat.get(message.chatId).push(message);
+        }
+        const lines = [
+          ...(await freshness()).filter(line => FRESHNESS_LINE.test(line)),
+          `mode: ${cursor === undefined ? "unread_snapshot" : "since_cursor"}`,
+          `count: ${result.messages.length}`,
+          `chats: ${byChat.size}`,
+          `truncated: ${result.truncated ? "yes; call again with next_cursor" : "no"}`,
+          `next_cursor: ${result.nextCursor}`
+        ];
+        for (const [id, messages] of byChat) {
+          const cached = store.data.chats[id];
+          lines.push("", `## ${store.chatName(id)} (${id}) unread=${cached?.unreadCount ?? 0}${cached?.markedUnread ? " marked_unread=yes" : ""}`);
+          lines.push(...messages.map(m => messageSummary(m)));
+        }
+        return textResult(lines.join("\n"));
+      }
+    },
+    {
+      name: "whatsapp_recover_messages",
+      description: "Ask your own phone to resend messages this device could not decrypt (shown as [undecryptable]). Messages only; nothing is sent to contacts. Recovered content replaces the placeholder in the cache within seconds. Only messages from the last 14 days can be recovered.",
+      input: {
+        ...chatTarget,
+        messageIds: z.array(z.string().min(1)).max(20).optional(),
+        limit: z.number().int().min(1).max(20).optional()
+      },
+      mutates: true,
+      async handler({ chatId, chatName, messageIds, limit = 20 }) {
+        await refreshCache();
+        const chat = chatId || chatName ? resolveChatOrError({ chatId, chatName }) : null;
+        const cutoff = Math.floor(Date.now() / 1000) - RECOVER_MAX_AGE_SECONDS;
+        const wanted = messageIds ? new Set(messageIds) : null;
+        const candidates = (chat ? [chat.id] : Object.keys(store.data.messages))
+          .flatMap(id => store.data.messages[id] ?? [])
+          .filter(m => !m.fromMe && !m.text && !m.media && !m.rawMessage && (m.timestamp ?? 0) >= cutoff &&
+            (m.messageType === "undecryptable" || m.messageType === "unknown") && (!wanted || wanted.has(m.id)))
+          .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
+          .slice(0, limit);
+        if (!candidates.length) return textResult("status: nothing_to_recover\ncount: 0");
+        const socket = await liveSocket("Recovering messages");
+        const results = await Promise.allSettled(candidates.map(m => socket.requestPlaceholderResend(
+          { remoteJid: m.chatId, id: m.id, fromMe: false, participant: m.participant ?? undefined },
+          { messageTimestamp: m.timestamp, pushName: m.pushName ?? undefined })));
+        return textResult([
+          "status: requested",
+          `count: ${candidates.length}`,
+          "next_step: re-read the chat (or whatsapp_inbox) in a few seconds; the phone must be online to resend",
+          ...candidates.map((m, i) => `- ${m.chatId}/${m.id} ${results[i].status === "fulfilled" ? (results[i].value === "RESOLVED" ? "already_received" : "requested") : `failed: ${results[i].reason?.message ?? results[i].reason}`}`)
         ].join("\n"));
       }
     },
@@ -767,13 +858,11 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
         const chat = resolveChatOrError({ chatId, chatName });
         const unread = Math.max(chat.unreadCount ?? 0, 1);
         const keys = store.getMessages(chat.id, store.getMessageLimit(chat.id)).filter(m => !m.fromMe)
-          .slice(-unread).map(m => store.getRawMessage(chat.id, m.id)?.key).filter(Boolean);
+          .slice(-unread).map(m => store.getRawMessage(chat.id, m.id)?.key ??
+            { remoteJid: chat.id, id: m.id, fromMe: false, participant: m.participant ?? undefined });
         const socket = await liveSocket("Marking as read");
         if (keys.length) await socket.readMessages(keys);
-        if (store.data.chats[chat.id]) {
-          store.data.chats[chat.id].unreadCount = 0;
-          store.scheduleSave();
-        }
+        store.markChatRead(chat.id);
         return textResult(`status: submitted\nchat: ${chat.displayName} (${chat.id})\nmessages_marked_read: ${keys.length}`);
       }
     },

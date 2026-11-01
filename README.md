@@ -426,7 +426,9 @@ Beyond chat listing, reading and sending, the MCP covers what an agent would
 otherwise need the WhatsApp UI for:
 
 - `whatsapp_search_messages` — full-text search across cached chats.
-- `whatsapp_wait_for_messages` — long-poll for new messages from a cursor.
+- `whatsapp_inbox` — everything new across chats since a cursor (or every unread chat), including offline backlog; optional long-poll.
+- `whatsapp_wait_for_messages` — long-poll for new messages from a timestamp cursor.
+- `whatsapp_recover_messages` — ask your phone to resend messages shown as `[undecryptable]`.
 - `phoneNumber` recipients (verified with WhatsApp first) and `replyToMessageId` quoting.
 - `whatsapp_react`, `whatsapp_edit_message`, `whatsapp_delete_message`, `whatsapp_forward_message`, `whatsapp_mark_read`.
 - `whatsapp_send_poll`, `whatsapp_send_location`.

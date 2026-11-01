@@ -1,4 +1,4 @@
-export function cacheStatusLines({ status, hasCreds, sessionOwner, pid = process.pid }, meta = {}) {
+export function cacheStatusLines({ status, hasCreds, sessionOwner, pid = process.pid, connectedSince, disconnectedSince, nextReconnectAt, reconnectCount }, meta = {}) {
   const live = status === "connected";
   return [
     "source: local_cache",
@@ -10,6 +10,13 @@ export function cacheStatusLines({ status, hasCreds, sessionOwner, pid = process
     `last_history_sync_at: ${meta.lastHistorySyncAt ?? "unknown"}`,
     `last_message_event_at: ${meta.lastMessageEventAt ?? "unknown"}`,
     "history_completeness: not_verified",
+    ...(live && connectedSince ? [`connected_since: ${connectedSince}`] : []),
+    ...(reconnectCount ? [`reconnects_this_process: ${reconnectCount}`] : []),
+    ...(live ? [] : [
+      `stale_since: ${disconnectedSince ?? meta.lastMessageEventAt ?? "unknown"}`,
+      ...(nextReconnectAt ? [`next_reconnect_at: ${nextReconnectAt}`] : []),
+      "freshness_warning: not connected; messages that arrived after stale_since may be missing and unread counts may be low"
+    ]),
     ...(live ? [] : [sessionOwner === "controller_bridge"
       ? "next_step: inspect the existing controller bridge connection; do not open a second direct socket"
       : hasCreds

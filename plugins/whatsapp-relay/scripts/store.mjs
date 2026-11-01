@@ -30,13 +30,32 @@ function withReceiptEvidence(entry) {
   return { ...entry, deliveryStatus: status, receipts };
 }
 
+const UNREAD_MODEL_VERSION = 1;
+const UNREAD_REPAIR_WINDOW_SECONDS = 72 * 3600;
+const CIPHERTEXT = proto.WebMessageInfo.StubType.CIPHERTEXT;
+
+// What an incoming entry is, for unread counts and display: undecryptable
+// messages count (the user has something to read), system stubs do not.
+function isReadableIncoming(entry) {
+  return !entry.fromMe && (entry.stubType === CIPHERTEXT || Boolean(entry.text || entry.media || entry.rawMessage));
+}
+
+function stubMessageType(stubType) {
+  if (stubType === CIPHERTEXT) return "undecryptable";
+  return `system_${proto.WebMessageInfo.StubType[stubType] ?? stubType}`.toLowerCase();
+}
+
 function emptyStore() {
   return {
     meta: {
       updatedAt: null,
       lastConnection: null,
       jidAliases: {},
-      messageLimitByChat: {}
+      messageLimitByChat: {},
+      // Monotonic arrival counter: whatsapp_inbox cursors use it because
+      // offline backlog messages carry old timestamps.
+      seq: 0,
+      unreadModelVersion: UNREAD_MODEL_VERSION
     },
     chats: {},
     contacts: {},
@@ -237,11 +256,42 @@ export class WhatsAppStore {
         contacts: parsed.contacts ?? {},
         messages: parsed.messages ?? {}
       };
+      if (!parsed.meta?.unreadModelVersion) this.#repairUnreadCounts();
     } catch (error) {
       if (error?.code !== "ENOENT") {
         throw error;
       }
     }
+  }
+
+  // Caches written before unread model v1 lost counts: chats.update carries
+  // per-batch deltas that overwrote the total, and offline ("append") messages
+  // were never counted. Best effort: incoming messages since your last reply
+  // in that chat, within the last 72 hours, never lower than the stored count.
+  #repairUnreadCounts() {
+    const cutoff = Math.floor(Date.now() / 1000) - UNREAD_REPAIR_WINDOW_SECONDS;
+    let changed = false;
+    for (const [chatId, chat] of Object.entries(this.data.chats)) {
+      const messages = this.data.messages[chatId] ?? [];
+      const lastMine = Math.max(0, ...messages.filter(entry => entry.fromMe).map(entry => entry.timestamp ?? 0));
+      const since = Math.max(lastMine, cutoff);
+      const recent = messages.filter(entry => isReadableIncoming(entry) && (entry.timestamp ?? 0) > since).length;
+      if (recent > (chat.unreadCount ?? 0)) {
+        chat.unreadCount = recent;
+        changed = true;
+      }
+    }
+    this.data.meta.unreadModelVersion = UNREAD_MODEL_VERSION;
+    if (changed) this.scheduleSave();
+  }
+
+  markChatRead(chatId) {
+    const chat = this.data.chats[this.canonicalJid(chatId)];
+    if (!chat) return;
+    chat.unreadCount = 0;
+    chat.markedUnread = false;
+    chat.readAt = Math.max(chat.readAt ?? 0, chat.lastMessageTimestamp ?? 0, Math.floor(Date.now() / 1000));
+    this.scheduleSave();
   }
 
   async save() {
@@ -381,7 +431,11 @@ export class WhatsAppStore {
     this.scheduleSave();
   }
 
-  upsertChat(chat) {
+  // chats.update carries unreadCount as a per-batch delta (>0), 0 when the
+  // chat was read on another device, and -1 when it was marked unread; only
+  // history sync carries an absolute count. Deltas are ignored because
+  // ingestMessage counts every arriving message itself.
+  upsertChat(chat, { absoluteUnread = false } = {}) {
     if (!chat?.id) {
       return;
     }
@@ -401,7 +455,7 @@ export class WhatsAppStore {
         contact?.notify ??
         null,
       archived: chat.archived ?? existing.archived ?? false,
-      unreadCount: chat.unreadCount ?? existing.unreadCount ?? 0,
+      unreadCount: existing.unreadCount ?? 0,
       timestamp:
         normalizeTimestamp(
           chat.conversationTimestamp ??
@@ -412,6 +466,18 @@ export class WhatsAppStore {
       isGroup: chat.id.endsWith("@g.us"),
       updatedAt: new Date().toISOString()
     };
+
+    if (typeof chat.unreadCount === "number") {
+      if (chat.unreadCount === 0 || (absoluteUnread && chat.unreadCount > 0)) {
+        normalized.unreadCount = Math.max(chat.unreadCount, 0);
+        normalized.markedUnread = false;
+        if (chat.unreadCount === 0) {
+          normalized.readAt = Math.max(existing.readAt ?? 0, existing.lastMessageTimestamp ?? 0, normalized.timestamp ?? 0);
+        }
+      } else if (chat.unreadCount < 0) {
+        normalized.markedUnread = true;
+      }
+    }
 
     normalized.displayName = preferredChatName(normalized, contact);
     this.data.chats[chat.id] = normalized;
@@ -425,7 +491,7 @@ export class WhatsAppStore {
     }
 
     for (const chat of history.chats ?? []) {
-      this.upsertChat(chat);
+      this.upsertChat(chat, { absoluteUnread: true });
     }
 
     for (const message of history.messages ?? []) {
@@ -435,6 +501,9 @@ export class WhatsAppStore {
     }
   }
 
+  // incrementUnread marks a live arrival (notify or offline append): it gets an
+  // inbox sequence number and can change the unread count. History sync,
+  // receipts and updates pass false.
   ingestMessage(message, { incrementUnread = true } = {}) {
     const key = message?.key;
     if (key?.remoteJidAlt) {
@@ -477,6 +546,11 @@ export class WhatsAppStore {
       text: extractMessageText(message.message),
       messageType: extractMessageType(message.message)
     };
+    if (!message.message && message.messageStubType) {
+      messageEntry.stubType = message.messageStubType;
+      messageEntry.stubParameters = message.messageStubParameters ?? [];
+      messageEntry.messageType = stubMessageType(message.messageStubType);
+    }
     if (message.status !== undefined) messageEntry.deliveryStatus = message.status;
     const contextInfo = Object.values(unwrapMessage(message.message) ?? {}).find(value => value?.contextInfo)?.contextInfo;
     if (contextInfo?.stanzaId) messageEntry.replyTo = contextInfo.stanzaId;
@@ -518,12 +592,22 @@ export class WhatsAppStore {
         }
         messageEntry.rawMessage.userReceipt = [...receipts.values()];
       }
+      // A blank stub (e.g. undecryptable) must not overwrite real content.
+      if (!message.message && list[existingIndex].rawMessage) return;
       list[existingIndex] = {
         ...list[existingIndex],
         ...messageEntry
       };
-      if (message.message && !messageEntry.media) delete list[existingIndex].media;
+      if (message.message) {
+        delete list[existingIndex].stubType;
+        delete list[existingIndex].stubParameters;
+        if (!messageEntry.media) delete list[existingIndex].media;
+      }
     } else {
+      if (incrementUnread) {
+        this.data.meta.seq = (this.data.meta.seq ?? 0) + 1;
+        messageEntry.seq = this.data.meta.seq;
+      }
       list.push(messageEntry);
     }
 
@@ -558,12 +642,20 @@ export class WhatsAppStore {
             lastMessageTimestamp: messageEntry.timestamp
           }
         : {}),
-      unreadCount:
-        incrementUnread && existingIndex < 0 && !messageEntry.fromMe
-          ? (currentChat.unreadCount ?? 0) + 1
-          : currentChat.unreadCount ?? 0,
+      unreadCount: currentChat.unreadCount ?? 0,
       updatedAt: new Date().toISOString()
     };
+    if (incrementUnread && existingIndex < 0) {
+      const chat = this.data.chats[remoteJid];
+      if (isReadableIncoming(messageEntry) && (messageEntry.timestamp ?? 0) > (chat.readAt ?? 0)) {
+        chat.unreadCount += 1;
+      } else if (messageEntry.fromMe && messageEntry.timestamp >= (chat.readAt ?? 0)) {
+        // Replying from any device reads the chat, as it does on the phone.
+        chat.unreadCount = 0;
+        chat.markedUnread = false;
+        chat.readAt = messageEntry.timestamp;
+      }
+    }
 
     this.scheduleSave();
   }
@@ -681,6 +773,29 @@ export class WhatsAppStore {
   }
 
   // Oldest first so a caller can advance its cursor to the last returned timestamp.
+  // Live arrivals after an inbox cursor, in arrival order. Without a cursor:
+  // the unread messages of every unread chat, plus the current cursor.
+  inbox({ cursor, chatId, includeFromMe = false, limit = 100 } = {}) {
+    const chatIds = chatId ? [this.canonicalJid(chatId)] : Object.keys(this.data.messages);
+    let entries;
+    if (cursor === undefined) {
+      entries = chatIds.flatMap(id => {
+        const unread = this.data.chats[id]?.unreadCount ?? 0;
+        if (!unread) return [];
+        return (this.data.messages[id] ?? []).filter(isReadableIncoming).slice(-unread);
+      }).sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+    } else {
+      entries = chatIds.flatMap(id => (this.data.messages[id] ?? []).filter(entry =>
+        (entry.seq ?? 0) > cursor && (includeFromMe || !entry.fromMe)))
+        .sort((a, b) => a.seq - b.seq);
+    }
+    const truncated = entries.length > limit;
+    // Keep the oldest when paging a cursor, the newest when listing unread.
+    entries = cursor === undefined ? entries.slice(-limit) : entries.slice(0, limit);
+    const nextCursor = cursor !== undefined && truncated ? entries.at(-1).seq : this.data.meta.seq ?? 0;
+    return { messages: entries.map(entry => this.#annotate(entry)), nextCursor, truncated };
+  }
+
   messagesSince({ sinceTimestamp = 0, chatId, includeFromMe = false, limit = 100 } = {}) {
     const chatIds = chatId ? [this.canonicalJid(chatId)] : Object.keys(this.data.messages);
     return chatIds.flatMap(id => (this.data.messages[id] ?? []).filter(entry =>
@@ -729,9 +844,14 @@ export class WhatsAppStore {
       entry.messageType = "revoked";
       delete entry.rawMessage;
       delete entry.media;
-    } else if (update.message && entry.rawMessage) {
-      const raw = this.getRawMessage(key.remoteJid, key.id);
+    } else if (update.message) {
+      // A placeholder resend can fill in a message that only had a stub.
+      const raw = this.getRawMessage(key.remoteJid, key.id) ??
+        { key: { remoteJid: key.remoteJid, id: key.id, fromMe: entry.fromMe, participant: entry.participant ?? undefined },
+          messageTimestamp: entry.timestamp, pushName: entry.pushName ?? undefined };
       this.ingestMessage({ ...raw, ...update, key: raw.key }, { incrementUnread: false });
+    } else if (update.messageStubParameters && entry.stubType) {
+      entry.stubParameters = update.messageStubParameters;
     }
     const updated = (this.data.messages[this.canonicalJid(key.remoteJid)] ?? []).find(message => message.id === key.id);
     if (update.status !== undefined) {

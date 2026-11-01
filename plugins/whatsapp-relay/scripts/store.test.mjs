@@ -348,3 +348,87 @@ test("protocol edits and revokes update their target and replies record the quot
   assert.equal(entry.messageType, "revoked");
   assert.deepEqual(store.getMessages(pn).map(m => m.id), ["orig", "reply"]);
 });
+
+test("unread counts offline arrivals, ignores chats.update deltas, and resets on read or reply", async t => {
+  const store = await fixture(t);
+  store.upsertChat({ id: pn, name: "Synthetic" });
+  for (let i = 1; i <= 3; i += 1) store.ingestMessage(message(`m${i}`, pn, 100 + i, `hi ${i}`));
+  // Baileys' buffered delta (+1 for the last batch) must not overwrite the total.
+  store.upsertChat({ id: pn, unreadCount: 1 });
+  assert.equal(store.data.chats[pn].unreadCount, 3);
+  // Read on the phone (app-state) clears it; a marked-unread flag is kept apart.
+  store.upsertChat({ id: pn, unreadCount: 0 });
+  assert.equal(store.data.chats[pn].unreadCount, 0);
+  store.upsertChat({ id: pn, unreadCount: -1 });
+  assert.equal(store.data.chats[pn].markedUnread, true);
+  store.ingestMessage(message("m4", pn, 104, "again"));
+  assert.equal(store.data.chats[pn].unreadCount, 1);
+  store.ingestMessage({ key: { id: "me1", remoteJid: pn, fromMe: true }, messageTimestamp: 105, message: { conversation: "reply" } });
+  assert.equal(store.data.chats[pn].unreadCount, 0);
+  // A redelivered message and history sync never count twice.
+  store.ingestMessage(message("m4", pn, 104, "again"));
+  store.ingestHistory({ chats: [], contacts: [], messages: [message("h1", pn, 90, "old")] });
+  assert.equal(store.data.chats[pn].unreadCount, 0);
+  store.ingestHistory({ chats: [{ id: pn, unreadCount: 7 }], contacts: [], messages: [] });
+  assert.equal(store.data.chats[pn].unreadCount, 7);
+  store.markChatRead(pn);
+  assert.equal(store.data.chats[pn].unreadCount, 0);
+  assert.equal(store.data.chats[pn].markedUnread, false);
+});
+
+test("the inbox cursor follows arrival order, so old-timestamp backlog is not skipped", async t => {
+  const store = await fixture(t);
+  store.ingestMessage(message("a", pn, 1000, "live"));
+  const first = store.inbox();
+  assert.deepEqual(first.messages.map(m => m.id), ["a"]);
+  assert.equal(store.inbox({ cursor: first.nextCursor }).messages.length, 0);
+  // Offline backlog arrives later but carries an older timestamp.
+  store.ingestMessage(message("b", lid, 500, "backlog"));
+  store.ingestMessage({ key: { id: "c", remoteJid: pn, fromMe: true }, messageTimestamp: 1001, message: { conversation: "mine" } });
+  const next = store.inbox({ cursor: first.nextCursor });
+  assert.deepEqual(next.messages.map(m => m.id), ["b"]);
+  assert.deepEqual(store.inbox({ cursor: first.nextCursor, includeFromMe: true }).messages.map(m => m.id), ["b", "c"]);
+  const paged = store.inbox({ cursor: first.nextCursor, includeFromMe: true, limit: 1 });
+  assert.equal(paged.truncated, true);
+  assert.deepEqual(store.inbox({ cursor: paged.nextCursor, includeFromMe: true }).messages.map(m => m.id), ["c"]);
+  // History sync has no arrival sequence and never shows up as new.
+  store.ingestHistory({ chats: [], contacts: [], messages: [message("h", pn, 2000, "synced")] });
+  assert.equal(store.inbox({ cursor: next.nextCursor }).messages.length, 0);
+});
+
+test("undecryptable stubs are labelled, counted as unread, and filled in by a later resend", async t => {
+  const store = await fixture(t);
+  const CIPHERTEXT = 2;
+  store.ingestMessage({ key: { id: "x", remoteJid: pn, fromMe: false }, messageTimestamp: 100, messageStubType: CIPHERTEXT, messageStubParameters: ["No session"] });
+  store.ingestMessage({ key: { id: "g", remoteJid: pn, fromMe: false }, messageTimestamp: 101, messageStubType: 20 });
+  let [stub, system] = store.getMessages(pn, 10);
+  assert.equal(stub.messageType, "undecryptable");
+  assert.match(system.messageType, /^system_/);
+  assert.equal(store.data.chats[pn].unreadCount, 1);
+  store.updateMessage({ remoteJid: pn, id: "x", fromMe: false }, { message: { conversation: "recovered" } });
+  [stub] = store.getMessages(pn, 10);
+  assert.equal(stub.text, "recovered");
+  assert.equal(stub.stubType, undefined);
+  // A late stub never overwrites real content.
+  store.ingestMessage({ key: { id: "x", remoteJid: pn, fromMe: false }, messageTimestamp: 100, messageStubType: CIPHERTEXT });
+  assert.equal(store.getMessages(pn, 10)[0].text, "recovered");
+  assert.equal(store.data.chats[pn].unreadCount, 1);
+});
+
+test("loading a pre-v1 cache repairs unread counts from messages since the last reply", async t => {
+  const store = await fixture(t);
+  const now = Math.floor(Date.now() / 1000);
+  await fs.writeFile(store.filePath, JSON.stringify({
+    meta: {},
+    chats: { [pn]: { id: pn, unreadCount: 1 } },
+    contacts: {},
+    messages: { [pn]: [
+      { id: "1", chatId: pn, fromMe: false, timestamp: now - 300, text: "before" },
+      { id: "2", chatId: pn, fromMe: true, timestamp: now - 200, text: "reply" },
+      ...[3, 4, 5].map(i => ({ id: String(i), chatId: pn, fromMe: false, timestamp: now - 100 + i, text: "new" }))
+    ] }
+  }));
+  await store.load();
+  assert.equal(store.data.chats[pn].unreadCount, 3);
+  assert.equal(store.data.meta.unreadModelVersion, 1);
+});
