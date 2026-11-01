@@ -10,6 +10,8 @@ import { ControllerConfigStore } from "./controller-config.mjs";
 import { getControllerProcessStatus } from "./controller-process.mjs";
 import { ensureRuntimeDirs, runtimeDaemonLockFile, runtimeDaemonSocket, scriptsDir } from "./paths.mjs";
 import { WhatsAppRuntime } from "./runtime.mjs";
+import { ScheduledStore } from "./scheduler.mjs";
+import { AlertEngine, WatchStore } from "./watch-rules.mjs";
 import { createWhatsAppService } from "./whatsapp-service.mjs";
 
 const WATCH_INTERVAL_MS = 5_000;
@@ -108,9 +110,16 @@ async function release({ ownerPid, reason = "released", ttlMs } = {}) {
   await runtime.stop();
 }
 
+// One instance each, shared by the tools and the background loops, so a rule
+// added through a tool is the same object the engine reads.
+const watches = new WatchStore();
+const scheduled = new ScheduledStore();
+
 const service = createWhatsAppService({
   runtime,
   controllerConfigStore,
+  watches,
+  scheduled,
   mode: "daemon",
   session: {
     blockedReason: releasedReason,
@@ -236,6 +245,41 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 
 await autoConnect();
 
+// Watch rules: notify, record, or start a capped background `codex exec` run.
+const alerts = new AlertEngine({
+  store: runtime.store,
+  watches,
+  async codexConfig() {
+    const config = await controllerConfigStore.load();
+    return { codexBin: config.codexBin, workspace: config.workspace, model: config.model, profile: config.profile };
+  }
+});
+await alerts.start().catch(error => console.error(`[${new Date().toISOString()}] alert engine start failed: ${error.message}`));
+runtime.on("messages.upsert", () => { alerts.tick(); });
+
+// Scheduled messages go through the same send tool (and its rate limits).
+await scheduled.ensureLoaded();
+await scheduled.recoverInterrupted();
+let schedulerRun = null;
+function runScheduled() {
+  if (schedulerRun || !scheduled.data.items.some(item => item.status === "pending")) return schedulerRun;
+  schedulerRun = scheduled.runDue({
+    send: async item => {
+      inFlight += 1;
+      try {
+        const result = await service.call("whatsapp_send_message", { chatId: item.chatId, text: item.text });
+        const text = result.content?.[0]?.text ?? "";
+        if (result.isError) return { ok: false, retry: text.startsWith("status: rate_limited"), error: text.split("\n").slice(0, 2).join(" ") };
+        return { ok: true, messageId: /message_id: (\S+)/.exec(text)?.[1] ?? null };
+      } finally {
+        inFlight -= 1;
+      }
+    }
+  }).catch(error => console.error(`[${new Date().toISOString()}] scheduler error: ${error.message}`))
+    .finally(() => { schedulerRun = null; });
+  return schedulerRun;
+}
+
 const watcher = setInterval(async () => {
   try {
     if (readLock()?.pid !== process.pid) return shutdown("lock file removed or taken over");
@@ -250,7 +294,9 @@ const watcher = setInterval(async () => {
     } else {
       await autoConnect();
     }
-    if (inFlight === 0 && scriptsVersion() !== bootVersion) return shutdown("relay scripts changed; the next call starts the new version");
+    alerts.tick();
+    runScheduled();
+    if (inFlight === 0 && !schedulerRun && scriptsVersion() !== bootVersion) return shutdown("relay scripts changed; the next call starts the new version");
     if (!runtime.hasSavedCreds() && inFlight === 0 && Date.now() - lastActivity > IDLE_EXIT_MS) return shutdown("idle without credentials");
   } catch (error) {
     console.error(`[${new Date().toISOString()}] watcher error: ${error.message}`);

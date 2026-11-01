@@ -435,6 +435,30 @@ otherwise need the WhatsApp UI for:
 - `whatsapp_check_number`, `whatsapp_contact_info`, `whatsapp_group_info`.
 - `whatsapp_reconnect` — reopen the saved session after it was replaced or dropped.
 
+Attention and automation (run inside the daemon, so they work with no Codex
+thread open):
+
+- `whatsapp_digest` — what needs you: unread chats, @mentions and replies to you, questions you have not answered. Muted chats sink.
+- `whatsapp_watch` / `whatsapp_unwatch` / `whatsapp_list_watches` — persisted rules (chat, sender, keywords, regex, chat kind, mentions of you) that record, show a macOS notification, or start a background `codex exec` run. Matches are batched for 15 s; Codex runs are one at a time, at most 6 an hour (`WHATSAPP_CODEX_RUNS_PER_HOUR`) and 5 minutes apart per rule. `whatsapp_alerts` reads what fired, with a cursor.
+- `whatsapp_schedule_message` / `whatsapp_list_scheduled` / `whatsapp_cancel_scheduled` — sent by the daemon at the time given; marked `missed` (never sent late) if the daemon was offline for more than `maxLateMinutes`, and `unknown` (never resent) if it stopped mid-send.
+
+Everything else the phone can do:
+
+- `whatsapp_sync_history` with `untilDate` pages back to a date (50 per request, 2 s apart, `maxRequests` cap).
+- `whatsapp_media_text` — local transcription (voice notes, video), OCR (`tesseract`), PDF (`pdftotext`) and document text; the text becomes searchable.
+- `whatsapp_read_messages` with `threadOf` returns a reply thread. Reads show view-once flags, quoted text, mentions, contact cards and live poll tallies.
+- `whatsapp_list_chats` with `filter` (archived, pinned, muted, disappearing) and `order: "phone"` (pinned first).
+- `whatsapp_manage_chat` — archive, pin, mute, mark unread, clear, star.
+- `whatsapp_group_admin` — create, add/remove/promote/demote, subject, description, invite links, join, leave, settings.
+- `whatsapp_status` — read your contacts' status updates, or post one to an explicit audience.
+- `whatsapp_presence`, `whatsapp_block`, `whatsapp_send_contact`, and `mentions` in `whatsapp_send_message`.
+
+Sends are paced to keep the account clear of WhatsApp's spam detection: at most
+20 a minute overall, 6 a minute to one chat and 10 first messages to new chats
+an hour (`WHATSAPP_SEND_RATE_GLOBAL_PER_MIN`, `WHATSAPP_SEND_RATE_CHAT_PER_MIN`,
+`WHATSAPP_NEW_CHATS_PER_HOUR`). A send over the limit is refused with
+`status: rate_limited` and `retry_after_seconds`; it is never queued.
+
 If a sending call loses its connection to the daemon after it was submitted,
 the result says `outcome: unknown`; read the chat before trying again.
 

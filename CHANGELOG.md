@@ -27,6 +27,16 @@ All notable changes to this project will be documented in this file.
 - `whatsapp_list_chats` filters by `kind` (direct or group); results show replies, reactions and edits.
 - The optional final-send confirmation toggle covers every new sending tool; new read-only tools are auto-approved.
 
+### Added — attention, automation and the rest of the phone
+
+- `whatsapp_digest`: unread chats, @mentions and replies to you, and questions awaiting your reply, muted chats last.
+- Persisted watch rules (`whatsapp_watch`, `whatsapp_unwatch`, `whatsapp_list_watches`, `whatsapp_alerts`) evaluated by the daemon: record, macOS notification, or a background `codex exec` run capped at one at a time, 6 an hour and a 5-minute cooldown per rule.
+- Scheduled messages sent by the daemon; missed or interrupted ones are reported, never sent late or twice.
+- `whatsapp_sync_history` `untilDate` paging; `whatsapp_media_text` (local transcription, OCR, PDF and document text, searchable); `threadOf` reply threads.
+- Reads show view-once, quoted text, mentions, contact cards, poll tallies, archived/pinned/muted/disappearing state; `whatsapp_list_chats` gains `filter` and the phone's pinned order.
+- `whatsapp_manage_chat`, `whatsapp_group_admin`, `whatsapp_status`, `whatsapp_presence`, `whatsapp_block`, `whatsapp_send_contact`, and `mentions` on sends.
+- Outgoing rate limits (20/min overall, 6/min per chat, 10 new chats/hour, configurable) refuse sends that could get the account banned.
+
 - Apply the optional final-send confirmation toggle to separately named official Slack MCP connections, without changing their authentication or enabled state.
 
 ### Added

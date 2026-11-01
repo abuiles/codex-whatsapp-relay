@@ -44,3 +44,7 @@ export async function ensureRuntimeDirs() {
   await fs.mkdir(controllerOutboxDir, { recursive: true });
   await fs.mkdir(controllerOutboxFailedDir, { recursive: true });
 }
+export const watchesFile = path.join(dataDir, "watches.json");
+export const alertsFile = path.join(dataDir, "alerts.jsonl");
+export const scheduledFile = path.join(dataDir, "scheduled-messages.json");
+export const mediaTextDir = path.join(dataDir, "downloads");

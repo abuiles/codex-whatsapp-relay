@@ -143,6 +143,7 @@ export class WhatsAppRuntime {
     this.store = new WhatsAppStore(storeFile);
     this.historyRequests = new HistoryRequests(historyRequestsFile);
     this.events = new EventEmitter();
+    this.presence = new Map(); // canonical jid -> { lastKnownPresence, lastSeen, at }
     this.socket = null;
     this.startPromise = null;
     this.shouldRenderQr = false;
@@ -342,6 +343,14 @@ export class WhatsAppRuntime {
         this.store.upsertChat(chat);
       }
       this.events.emit("chats.update", chats);
+    });
+
+    socket.ev.on("presence.update", ({ id, presences }) => {
+      if (socket !== this.socket) return;
+      for (const [jid, presence] of Object.entries(presences ?? {})) {
+        this.presence.set(this.store.canonicalJid(jid), { ...presence, chatId: id, at: Date.now() });
+      }
+      this.events.emit("presence.update", { id, presences });
     });
 
     socket.ev.on("lid-mapping.update", mapping => {

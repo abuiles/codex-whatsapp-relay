@@ -11,15 +11,22 @@ import { enqueueControllerCommand } from "./controller-outbox.mjs";
 import { normalizePermissionLevel, resolvePermissionLevel } from "./controller-permissions.mjs";
 import { getControllerProcessStatus, startControllerDaemon, stopControllerDaemon } from "./controller-process.mjs";
 import { downloadMessageMedia, freezePreparedMedia, prepareMedia } from "./media.mjs";
-import { credsFile, storeFile } from "./paths.mjs";
-import { queryPhoneDigits, unwrapMessage } from "./store.mjs";
+import { alertsFile, credsFile, storeFile } from "./paths.mjs";
+import { ScheduledStore } from "./scheduler.mjs";
+import { SendLimiter } from "./send-limiter.mjs";
+import { extraTools, toUserJid } from "./service-extras.mjs";
+import { STATUS_JID, isMuted, queryPhoneDigits, unwrapMessage } from "./store.mjs";
+import { WatchStore } from "./watch-rules.mjs";
 import { normalizeTtsProvider } from "./voice-replier.mjs";
 
 export const FEATURES = [
   "send_message_media_v1", "read_message_media_v1", "in_place_reload_v1", "history_request_journal_v1",
   "receipt_evidence_v1", "single_socket_daemon_v1", "message_search_v1", "wait_for_messages_v1",
   "phone_number_recipients_v1", "reply_react_edit_delete_forward_v1", "polls_locations_v1", "group_info_v1",
-  "unread_model_v1", "inbox_cursor_v1", "recover_messages_v1", "freshness_watchdog_v1"
+  "unread_model_v1", "inbox_cursor_v1", "recover_messages_v1", "freshness_watchdog_v1",
+  "watch_rules_v1", "digest_v1", "media_text_v1", "chat_state_v1", "rich_messages_v1", "status_updates_v1",
+  "manage_chat_v1", "group_admin_v1", "presence_block_v1", "contact_cards_v1", "scheduled_messages_v1",
+  "history_until_date_v1", "mentions_v1", "send_rate_limit_v1"
 ];
 
 const CHAT_ID_PATTERN = /^(?:\d{7,15}@s\.whatsapp\.net|\d+@lid|\d+(?:-\d+)?@g\.us)$/;
@@ -55,6 +62,10 @@ function chatSummary(chat) {
     `cached_messages=${chat.cachedMessageCount ?? "unknown"}`,
     `  unread=${chat.unreadCount ?? 0}`,
     chat.markedUnread ? "marked_unread=yes" : null,
+    chat.archived ? "archived=yes" : null,
+    chat.pinned ? "pinned=yes" : null,
+    isMuted(chat) ? `muted=${chat.muteEndTime === -1 ? "always" : `until_${new Date(chat.muteEndTime).toISOString()}`}` : null,
+    chat.ephemeralExpiration ? `disappearing=${Math.round(chat.ephemeralExpiration / 3600)}h` : null,
     stamp ? `last=${new Date(stamp * 1000).toISOString()}` : null,
     chat.lastMessageText ? `text=${oneLine(chat.lastMessageText, 120)}` : null
   ].filter(Boolean).join(" ");
@@ -68,7 +79,14 @@ export function messageSummary(message, { withChat = false } = {}) {
   const reply = message.replyTo ? ` reply_to=${message.replyTo}` : "";
   const edited = message.editedAt ? " edited=yes" : "";
   const reactions = message.reactions ? ` reactions=${JSON.stringify(message.reactions)}` : "";
-  return `- [${formatTimestamp(message.timestamp)}] id=${message.id}${where} status=${proto.WebMessageInfo.Status[message.deliveryStatus] ?? "unknown"} ${author}: ${messageBody(message)}${media}${reply}${edited}${reactions}${receipts}`;
+  const quoted = message.quotedText ? ` quoted=${JSON.stringify(oneLine(message.quotedText, 80))}` : "";
+  const mentions = message.mentions?.length ? ` mentions=${JSON.stringify(message.mentions)}` : "";
+  const viewOnce = message.viewOnce ? " view_once=yes" : "";
+  const contacts = message.contacts?.length ? ` contacts=${JSON.stringify(message.contacts)}` : "";
+  const poll = message.poll ? ` poll=${JSON.stringify(message.poll.options.map(name => ({ name,
+    votes: Object.values(message.pollVotes ?? {}).filter(picks => picks.includes(name)).length })))} poll_max_choices=${message.poll.selectableCount || "any"}` : "";
+  const extracted = message.extractedText ? ` ${message.extractedKind ?? "extracted_text"}=${JSON.stringify(oneLine(message.extractedText, 300))}` : "";
+  return `- [${formatTimestamp(message.timestamp)}] id=${message.id}${where} status=${proto.WebMessageInfo.Status[message.deliveryStatus] ?? "unknown"} ${author}: ${messageBody(message)}${media}${viewOnce}${reply}${quoted}${mentions}${contacts}${poll}${extracted}${edited}${reactions}${receipts}`;
 }
 
 // Server-generated group notices (joins, setting changes) get numeric ids;
@@ -153,7 +171,8 @@ const mediaInput = {
  *       "cache_only" – daemon unreachable; never opens a socket
  * session: optional { blockedReason(), owner, beforeBridgeStart(), afterBridgeStart(status), afterBridgeStop(), reconnect() }
  */
-export function createWhatsAppService({ runtime, mode = "daemon", session = {}, controllerConfigStore = new ControllerConfigStore() }) {
+export function createWhatsAppService({ runtime, mode = "daemon", session = {}, controllerConfigStore = new ControllerConfigStore(),
+  watches = new WatchStore(), scheduled = new ScheduledStore(), alertsPath = alertsFile, sendLimiter = new SendLimiter() }) {
   const store = runtime.store;
   const recoverRequestedAt = new Map();
 
@@ -249,7 +268,16 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
   }
 
   async function sendContent(chat, content, options, extra) {
+    // A first message to a number with no history is what WhatsApp's spam
+    // detection weighs most; status posts are not chats.
+    const isNewChat = chat.id !== STATUS_JID && !store.data.chats[chat.id] && !store.getMessageCount(chat.id);
+    const limited = sendLimiter.check(chat.id, { isNewChat });
+    if (limited) {
+      return textResult([`status: rate_limited`, `reason: ${limited.reason}`, `retry_after_seconds: ${limited.retryAfterSeconds}`,
+        "Nothing was sent. Pacing protects the account from WhatsApp's automated-sending bans."].join("\n"), { isError: true });
+    }
     const socket = await liveSocket("Sending");
+    sendLimiter.record(chat.id, { isNewChat });
     return submitted(chat, await socket.sendMessage(chat.id, content, options), extra);
   }
 
@@ -292,6 +320,34 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
     for (const participant of metadata.participants ?? []) {
       store.recordJidMapping({ lid: participant.lid, pn: participant.phoneNumber ?? participant.jid });
     }
+  }
+
+  // Phones answer at most 50 messages per request; page until the oldest
+  // cached message reaches the target, progress stops, or the cap is hit.
+  async function pageHistoryUntil(chat, target, maxRequests) {
+    let requests = 0;
+    let received = 0;
+    let stopReason = "max_requests";
+    let oldest = store.getOldestMessage(chat.id)?.timestamp ?? null;
+    while (requests < maxRequests) {
+      if (oldest && oldest <= target) { stopReason = "reached"; break; }
+      if (requests) await delay(2000);
+      const result = await runtime.syncChatHistory({ chatId: chat.id, count: 50 });
+      requests += 1;
+      received += result.messages ?? 0;
+      const next = store.getOldestMessage(chat.id)?.timestamp ?? null;
+      if (result.state !== "response_received" || !next || (oldest && next >= oldest)) {
+        stopReason = result.reused ? "previous_request_unresolved" : result.state !== "response_received" ? `request_${result.state}` : "no_older_messages_returned";
+        oldest = next;
+        break;
+      }
+      oldest = next;
+    }
+    if (oldest && oldest <= target) stopReason = "reached";
+    return textResult([`chat: ${chat.displayName} (${chat.id})`, `until: ${formatTimestamp(target)}`,
+      `reached: ${stopReason === "reached" ? "yes" : "no"}`, `stop_reason: ${stopReason}`, `requests: ${requests}`,
+      `messages_received: ${received}`, `oldest_cached: ${formatTimestamp(oldest)}`, `cached_messages: ${store.getMessageCount(chat.id)}`,
+      ...(stopReason === "reached" ? [] : ["next_step: call again later (the phone must be online), or with statusOnly to check pending requests"])].join("\n"));
   }
 
   const tools = [
@@ -492,17 +548,20 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
     },
     {
       name: "whatsapp_list_chats",
-      description: "Find chats, groups and saved contacts in the local cache. query matches names (accent/word-order insensitive), chat IDs, or phone numbers in any format.",
+      description: "Find chats, groups and saved contacts in the local cache. query matches names (accent/word-order insensitive), chat IDs, or phone numbers in any format. Shows archived/pinned/muted/disappearing state; order=phone mirrors the phone's chat list.",
       input: {
         limit: z.number().int().min(1).max(100).optional(),
         query: z.string().min(1).optional(),
         unreadOnly: z.boolean().optional(),
-        kind: z.enum(["all", "direct", "group"]).optional()
+        kind: z.enum(["all", "direct", "group"]).optional(),
+        filter: z.enum(["archived", "pinned", "muted", "disappearing"]).optional(),
+        includeArchived: z.boolean().optional().describe("Default true; false hides archived chats like the phone's main list"),
+        order: z.enum(["recent", "phone"]).optional().describe("phone = pinned chats first, then most recent")
       },
       mutates: false,
-      async handler({ limit = 20, query, unreadOnly = false, kind = "all" }) {
+      async handler({ limit = 20, query, unreadOnly = false, kind = "all", filter, includeArchived = true, order = "recent" }) {
         await refreshCache();
-        const chats = store.listChats({ limit: kind === "all" ? limit : Number.MAX_SAFE_INTEGER, query, unreadOnly })
+        const chats = store.listChats({ limit: kind === "all" ? limit : Number.MAX_SAFE_INTEGER, query, unreadOnly, filter, includeArchived, order })
           .filter(chat => kind === "all" || (kind === "group") === chat.id.endsWith("@g.us"))
           .slice(0, limit);
         const state = await freshness();
@@ -520,13 +579,20 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
         ...chatTarget,
         limit: z.number().int().min(1).max(100).optional(),
         messageId: z.string().min(1).optional(),
-        downloadMedia: z.boolean().optional()
+        downloadMedia: z.boolean().optional(),
+        threadOf: z.string().min(1).optional().describe("A message ID: return it with every cached reply to it (and replies to those)")
       },
       mutates: false,
-      async handler({ chatId, chatName, limit = 20, messageId, downloadMedia = false }) {
+      async handler({ chatId, chatName, limit = 20, messageId, downloadMedia = false, threadOf }) {
         await refreshCache();
         const state = await freshness();
         const chat = resolveChatOrError({ chatId, chatName }, state);
+        if (threadOf) {
+          const thread = store.thread(chat.id, threadOf);
+          if (!thread.length) throw new Error(`Message ${threadOf} is not in the cache for ${chat.displayName}.`);
+          return textResult([`chat: ${chat.displayName} (${chat.id})`, `thread_root: ${threadOf}`, `thread_size: ${thread.length}`, ...state,
+            ...thread.map(m => messageSummary(m))].join("\n"));
+        }
         if (downloadMedia) {
           if (!messageId) throw new Error("Downloading media requires an exact messageId.");
           return downloadCachedMedia(chat, messageId);
@@ -682,10 +748,12 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
         count: z.number().int().min(1).max(50).optional(),
         beforeMessageId: z.string().min(1).optional(),
         statusOnly: z.boolean().optional(),
-        requestId: z.string().min(1).optional()
+        requestId: z.string().min(1).optional(),
+        untilDate: z.string().optional().describe("Keep paging back (50 per request, ~2 s apart) until the cache reaches this ISO date"),
+        maxRequests: z.number().int().min(1).max(30).optional().describe("Cap for untilDate paging (default 10)")
       },
       mutates: false,
-      async handler({ chatId, chatName, count = 50, beforeMessageId, statusOnly = false, requestId }) {
+      async handler({ chatId, chatName, count = 50, beforeMessageId, statusOnly = false, requestId, untilDate, maxRequests = 10 }) {
         if (statusOnly || requestId) {
           await runtime.historyRequests.load();
           const canonicalChatId = chatId || chatName ? resolveChatOrError({ chatId, chatName }).id : undefined;
@@ -694,6 +762,11 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
         }
         await liveSocket("History sync");
         const chat = resolveChatOrError({ chatId, chatName });
+        if (untilDate) {
+          const target = Date.parse(untilDate) / 1000;
+          if (!Number.isFinite(target)) throw new Error("untilDate is not a valid ISO date.");
+          return pageHistoryUntil(chat, target, maxRequests);
+        }
         const result = await runtime.syncChatHistory({ chatId: chat.id, count, beforeMessageId });
         return textResult([
           `chat: ${chat.displayName} (${chat.id})`,
@@ -724,10 +797,12 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
         ...recipient,
         text: z.string().max(4000).optional(),
         replyToMessageId: z.string().min(1).optional(),
-        media: z.object(mediaInput).optional()
+        media: z.object(mediaInput).optional(),
+        mentions: z.array(z.string().min(5)).max(50).optional().describe("Phone numbers or WhatsApp IDs to @mention; @digits is added to the text when missing")
       },
       mutates: true,
-      async handler({ chatId, chatName, phoneNumber, text, replyToMessageId, media }) {
+      async handler({ chatId, chatName, phoneNumber, text, replyToMessageId, media, mentions }) {
+        if (mentions?.length && media) throw new Error("Mentions are supported on text messages only.");
         if (media && text?.trim()) throw new Error("Use media.caption instead of a separate text when sending media.");
         if (!media) {
           if (typeof text !== "string" || !text.trim()) throw new Error("A nonempty text or a media attachment is required.");
@@ -744,7 +819,15 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
           const command = await enqueueControllerCommand({ type: "send_message", payload: { chatId: chat.id, text } });
           return textResult(`status: queued\ncommand_id: ${command.id}\nchat: ${chat.displayName} (${chat.id})\nvia: controller_bridge\ndelivery: not_yet_verified`);
         }
-        return sendContent(chat, { text }, quoted ? { quoted } : undefined, quoted ? [`reply_to: ${replyToMessageId}`] : []);
+        const content = { text };
+        if (mentions?.length) {
+          // WhatsApp renders @digits as a mention only when the JID is listed too.
+          content.mentions = mentions.map(value => toUserJid(value, store));
+          const missing = content.mentions.map(jid => jid.split("@")[0]).filter(user => !text.includes(`@${user}`));
+          if (missing.length) content.text = `${text} ${missing.map(user => `@${user}`).join(" ")}`;
+        }
+        return sendContent(chat, content, quoted ? { quoted } : undefined,
+          [...(quoted ? [`reply_to: ${replyToMessageId}`] : []), ...(content.mentions ? [`mentions: ${JSON.stringify(content.mentions)}`] : [])]);
       }
     },
     {
@@ -1005,6 +1088,9 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
       }
     }
   ];
+
+  tools.push(...extraTools({ runtime, store, mode, textResult, liveSocket, resolveChatOrError, resolveRecipient, cachedMessage,
+    sendContent, refreshCache, freshness, messageSummary, chatSummary, watches, scheduled, alertsPath, chatTarget, recipient, mediaInput }));
 
   const byName = new Map(tools.map(tool => [tool.name, tool]));
 

@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { jidNormalizedUser, proto } from "@whiskeysockets/baileys";
 
 const DEFAULT_MAX_MESSAGES_PER_CHAT = 200;
@@ -32,12 +32,17 @@ function withReceiptEvidence(entry) {
 
 const UNREAD_MODEL_VERSION = 2;
 // Status updates are not a conversation; WhatsApp does not badge them as unread chats.
-const STATUS_JID = "status@broadcast";
+export const STATUS_JID = "status@broadcast";
 const UNREAD_REPAIR_WINDOW_SECONDS = 72 * 3600;
 const CIPHERTEXT = proto.WebMessageInfo.StubType.CIPHERTEXT;
 
 // What an incoming entry is, for unread counts and display: undecryptable
 // messages count (the user has something to read), system stubs do not.
+// muteEndTime is a millisecond timestamp; -1 means muted forever.
+export function isMuted(chat, now = Date.now()) {
+  return chat?.muteEndTime === -1 || (chat?.muteEndTime ?? 0) > now;
+}
+
 function isReadableIncoming(entry) {
   return !entry.fromMe && (entry.stubType === CIPHERTEXT || Boolean(entry.text || entry.media || entry.rawMessage));
 }
@@ -169,7 +174,15 @@ export function extractMessageText(message) {
     return payload.pollCreationMessage.name;
   }
 
-  const firstKey = Object.keys(payload).find(key => key !== "messageContextInfo" && payload[key] != null);
+  if (payload.pollCreationMessageV2?.name || payload.pollCreationMessageV3?.name) {
+    return (payload.pollCreationMessageV2 ?? payload.pollCreationMessageV3).name;
+  }
+
+  if (payload.locationMessage) {
+    return `[location] ${payload.locationMessage.name ?? ""} ${payload.locationMessage.degreesLatitude ?? ""},${payload.locationMessage.degreesLongitude ?? ""}`.trim();
+  }
+
+  const firstKey = contentKey(payload);
   return firstKey ? `[${firstKey}]` : "";
 }
 
@@ -179,7 +192,26 @@ export function extractMessageType(message) {
     return "unknown";
   }
 
-  return Object.keys(payload).find(key => key !== "messageContextInfo" && payload[key] != null) ?? "unknown";
+  return contentKey(payload) ?? "unknown";
+}
+
+// Group messages carry a senderKeyDistributionMessage next to the real content;
+// it is key material, not the message.
+const NON_CONTENT_KEYS = new Set(["messageContextInfo", "senderKeyDistributionMessage"]);
+function contentKey(payload) {
+  return Object.keys(payload).find(key => !NON_CONTENT_KEYS.has(key) && payload[key] != null);
+}
+
+export function isViewOnce(message) {
+  const inner = message?.ephemeralMessage?.message ?? message;
+  return Boolean(inner?.viewOnceMessage || inner?.viewOnceMessageV2 || inner?.viewOnceMessageV2Extension ||
+    Object.values(inner ?? {}).some(value => value?.viewOnce === true));
+}
+
+function vcardSummary(vcard = "") {
+  const name = /^FN[^:]*:(.*)$/m.exec(vcard)?.[1]?.trim() ?? null;
+  const phones = [...vcard.matchAll(/^(?:item\d+\.)?TEL[^:]*:(.*)$/gm)].map(match => match[1].trim());
+  return { name, phones };
 }
 
 export function extractAudioMessage(message) {
@@ -216,6 +248,7 @@ function jidDigits(jid) {
 }
 
 function preferredChatName(chat, contact) {
+  if (chat.id === STATUS_JID) return "Status updates";
   if (!chat.isGroup && !chat.id.endsWith("@g.us")) {
     const names = [contact?.name, chat.name, contact?.notify, contact?.verifiedName, chat.pushName];
     const named = names.find(value => value && value !== chat.id &&
@@ -460,6 +493,9 @@ export class WhatsAppStore {
         contact?.notify ??
         null,
       archived: chat.archived ?? existing.archived ?? false,
+      pinned: chat.pinned !== undefined ? normalizeTimestamp(chat.pinned) : existing.pinned ?? null,
+      muteEndTime: chat.muteEndTime !== undefined ? normalizeTimestamp(chat.muteEndTime) : existing.muteEndTime ?? null,
+      ephemeralExpiration: chat.ephemeralExpiration !== undefined ? (chat.ephemeralExpiration || null) : existing.ephemeralExpiration ?? null,
       unreadCount: existing.unreadCount ?? 0,
       timestamp:
         normalizeTimestamp(
@@ -558,7 +594,24 @@ export class WhatsAppStore {
     }
     if (message.status !== undefined) messageEntry.deliveryStatus = message.status;
     const contextInfo = Object.values(unwrapMessage(message.message) ?? {}).find(value => value?.contextInfo)?.contextInfo;
-    if (contextInfo?.stanzaId) messageEntry.replyTo = contextInfo.stanzaId;
+    if (contextInfo?.stanzaId) {
+      messageEntry.replyTo = contextInfo.stanzaId;
+      if (contextInfo.participant) messageEntry.quotedParticipant = this.canonicalJid(contextInfo.participant);
+      if (contextInfo.quotedMessage) messageEntry.quotedText = extractMessageText(contextInfo.quotedMessage).slice(0, 200);
+    }
+    if (contextInfo?.mentionedJid?.length) messageEntry.mentions = contextInfo.mentionedJid.map(jid => this.canonicalJid(jid));
+    if (isViewOnce(message.message)) messageEntry.viewOnce = true;
+    const content = unwrapMessage(message.message);
+    const cards = content?.contactMessage ? [content.contactMessage] : content?.contactsArrayMessage?.contacts ?? [];
+    if (cards.length) messageEntry.contacts = cards.map(card => {
+      const parsed = vcardSummary(card.vcard);
+      return { name: card.displayName ?? parsed.name, phones: parsed.phones };
+    });
+    const poll = content?.pollCreationMessage ?? content?.pollCreationMessageV2 ?? content?.pollCreationMessageV3;
+    if (poll) messageEntry.poll = {
+      options: (poll.options ?? []).map(option => option.optionName ?? ""),
+      selectableCount: poll.selectableOptionsCount ?? 0
+    };
     if (message.message) {
       messageEntry.rawMessage = proto.WebMessageInfo.toObject(proto.WebMessageInfo.fromObject(message), {
         bytes: String, longs: String
@@ -696,7 +749,109 @@ export class WhatsAppStore {
     return { ...candidate, displayName: preferredChatName(candidate, contact) };
   }
 
-  listChats({ limit = 20, query, unreadOnly = false } = {}) {
+  // Votes are aggregated by Baileys from the decrypted updates; keep the latest
+  // selection per voter, as WhatsApp does when someone changes their vote.
+  applyPollUpdates(entry, pollUpdates) {
+    const votes = { ...entry.pollVotes };
+    for (const update of pollUpdates) {
+      const key = update.pollUpdateMessageKey ?? {};
+      const voter = key.fromMe ? "me" : this.canonicalJid(key.participant ?? key.remoteJid);
+      const hashes = (update.vote?.selectedOptions ?? []).map(option => Buffer.from(option).toString("hex"));
+      votes[voter] = entry.poll.options.filter(name =>
+        hashes.includes(createHash("sha256").update(name).digest("hex")));
+    }
+    entry.pollVotes = votes;
+    this.scheduleSave();
+  }
+
+  pollTally(entry) {
+    if (!entry?.poll) return null;
+    return entry.poll.options.map(name => ({
+      name,
+      voters: Object.entries(entry.pollVotes ?? {}).filter(([, picks]) => picks.includes(name)).map(([voter]) => voter)
+    }));
+  }
+
+  setExtractedText(chatId, messageId, text, kind) {
+    const entry = (this.data.messages[this.canonicalJid(chatId)] ?? []).find(message => message.id === messageId);
+    if (!entry) return false;
+    entry.extractedText = String(text ?? "").slice(0, 20000);
+    entry.extractedKind = kind;
+    this.scheduleSave();
+    return true;
+  }
+
+  getMessage(chatId, messageId) {
+    const entry = (this.data.messages[this.canonicalJid(chatId)] ?? []).find(message => message.id === messageId);
+    return entry ? this.#annotate(entry) : null;
+  }
+
+  // My own JIDs (phone and LID) so mentions of me can be recognized.
+  myJids() {
+    const user = this.data.meta.lastConnection?.user ?? {};
+    return new Set([user.id, user.lid].filter(Boolean).flatMap(jid => {
+      const bare = jid.replace(/:\d+@/, "@");
+      return [bare, this.canonicalJid(bare)];
+    }));
+  }
+
+  // A reply thread: the root message and every cached message replying to it,
+  // directly or through other replies.
+  thread(chatId, messageId) {
+    const list = this.data.messages[this.canonicalJid(chatId)] ?? [];
+    const byId = new Map(list.map(entry => [entry.id, entry]));
+    let root = byId.get(messageId);
+    while (root?.replyTo && byId.has(root.replyTo)) root = byId.get(root.replyTo);
+    const rootId = root?.id ?? messageId;
+    const members = new Set([rootId]);
+    for (const entry of list) if (entry.replyTo && members.has(entry.replyTo)) members.add(entry.id);
+    return list.filter(entry => members.has(entry.id)).map(entry => this.#annotate(entry));
+  }
+
+  statusUpdates({ sinceTimestamp } = {}) {
+    const since = sinceTimestamp ?? Math.floor(Date.now() / 1000) - 24 * 3600;
+    return (this.data.messages[STATUS_JID] ?? []).filter(entry =>
+      (entry.timestamp ?? 0) > since && !entry.stubType && entry.messageType !== "protocolMessage")
+      .map(entry => this.#annotate(entry));
+  }
+
+  // What needs attention since a point in time, grouped by chat: unread count,
+  // messages that mention me, and questions nobody (me) has answered yet.
+  digest({ sinceTimestamp, limitPerChat = 5 } = {}) {
+    const me = this.myJids();
+    const chats = [];
+    for (const [chatId, list] of Object.entries(this.data.messages)) {
+      if (chatId === STATUS_JID) continue;
+      const chat = this.data.chats[chatId] ?? {};
+      if (chat.archived && !(chat.unreadCount > 0)) continue;
+      const recent = list.filter(entry => (entry.timestamp ?? 0) > sinceTimestamp);
+      if (!recent.length && !(chat.unreadCount > 0)) continue;
+      const myLast = list.findLast(entry => entry.fromMe)?.timestamp ?? 0;
+      const myIds = new Set(list.filter(entry => entry.fromMe).map(entry => entry.id));
+      const incoming = recent.filter(isReadableIncoming);
+      const mentions = incoming.filter(entry => entry.mentions?.some(jid => me.has(jid)) ||
+        (entry.replyTo && myIds.has(entry.replyTo)));
+      const isGroup = chatId.endsWith("@g.us");
+      const questions = incoming.filter(entry => (entry.timestamp ?? 0) > myLast && /\?\s*$|\?\s/.test(entry.text ?? "") &&
+        (!isGroup || mentions.includes(entry)));
+      const unread = chat.unreadCount ?? 0;
+      if (!unread && !mentions.length && !questions.length && !chat.markedUnread) continue;
+      chats.push({
+        chatId, chatName: this.chatName(chatId), isGroup, unread, markedUnread: Boolean(chat.markedUnread),
+        muted: (chat.muteEndTime ?? 0) > Date.now() || chat.muteEndTime === -1,
+        lastTimestamp: list.at(-1)?.timestamp ?? 0,
+        mentions: mentions.slice(-limitPerChat).map(entry => this.#annotate(entry)),
+        questions: questions.slice(-limitPerChat).map(entry => this.#annotate(entry)),
+        latest: incoming.slice(-Math.min(unread || 1, limitPerChat)).map(entry => this.#annotate(entry))
+      });
+    }
+    // Direct questions and mentions first, then busiest unread chats.
+    return chats.sort((a, b) =>
+      (b.mentions.length + b.questions.length > 0) - (a.mentions.length + a.questions.length > 0) ||
+      a.muted - b.muted || b.unread - a.unread || b.lastTimestamp - a.lastTimestamp);
+  }
+
+  listChats({ limit = 20, query, unreadOnly = false, order = "recent", includeArchived = true, filter } = {}) {
     const normalizedQuery = normalizedName(query);
     const phoneQuery = queryPhoneDigits(query);
     const entries = new Map(Object.values(this.data.chats).map(chat => [chat.id, {
@@ -717,6 +872,11 @@ export class WhatsAppStore {
         if (unreadOnly && !(chat.unreadCount > 0)) {
           return false;
         }
+        if (!includeArchived && chat.archived) return false;
+        if (filter === "archived" && !chat.archived) return false;
+        if (filter === "pinned" && !chat.pinned) return false;
+        if (filter === "muted" && !isMuted(chat)) return false;
+        if (filter === "disappearing" && !chat.ephemeralExpiration) return false;
 
         if (!normalizedQuery) {
           return true;
@@ -745,6 +905,8 @@ export class WhatsAppStore {
       })
       .sort(
         (a, b) =>
+          // The phone's order: pinned chats first (most recently pinned on top).
+          (order === "phone" ? (b.pinned ?? 0) - (a.pinned ?? 0) : 0) ||
           (b.lastMessageTimestamp ?? b.timestamp ?? 0) -
           (a.lastMessageTimestamp ?? a.timestamp ?? 0)
       );
@@ -775,7 +937,8 @@ export class WhatsAppStore {
     if (!folded) return [];
     const chatIds = chatId ? [this.canonicalJid(chatId)] : Object.keys(this.data.messages);
     const hits = chatIds.flatMap(id => (this.data.messages[id] ?? []).filter(entry =>
-      (!sinceTimestamp || (entry.timestamp ?? 0) > sinceTimestamp) && matchesTokens(normalizedName(entry.text), folded)));
+      (!sinceTimestamp || (entry.timestamp ?? 0) > sinceTimestamp) &&
+      matchesTokens(normalizedName(entry.extractedText ? `${entry.text} ${entry.extractedText}` : entry.text), folded)));
     return hits.sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0)).slice(0, limit).map(entry => this.#annotate(entry));
   }
 
@@ -860,6 +1023,7 @@ export class WhatsAppStore {
     } else if (update.messageStubParameters && entry.stubType) {
       entry.stubParameters = update.messageStubParameters;
     }
+    if (update.pollUpdates?.length && entry.poll) this.applyPollUpdates(entry, update.pollUpdates);
     const updated = (this.data.messages[this.canonicalJid(key.remoteJid)] ?? []).find(message => message.id === key.id);
     if (update.status !== undefined) {
       updated.deliveryStatus = mergeDeliveryStatus(updated.deliveryStatus, update.status);

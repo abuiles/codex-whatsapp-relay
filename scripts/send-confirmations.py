@@ -63,12 +63,16 @@ def build_targets(config, slack_id=None, gmail_id=None):
     for server in servers:
         for tool in ['whatsapp_send_message', 'whatsapp_send_media', 'whatsapp_react', 'whatsapp_edit_message',
                      'whatsapp_delete_message', 'whatsapp_forward_message', 'whatsapp_mark_read',
-                     'whatsapp_send_poll', 'whatsapp_send_location']:
+                     'whatsapp_send_poll', 'whatsapp_send_location', 'whatsapp_send_contact', 'whatsapp_schedule_message',
+                     'whatsapp_status', 'whatsapp_manage_chat', 'whatsapp_group_admin', 'whatsapp_block',
+                     'whatsapp_presence', 'whatsapp_watch']:
             add(server + ['tools', tool, 'approval_mode'], 'prompt')
         for tool in ['whatsapp_prepare_media', 'whatsapp_read_messages', 'whatsapp_list_chats', 'whatsapp_auth_status',
                      'whatsapp_message_status', 'whatsapp_sync_history', 'whatsapp_search_messages',
                      'whatsapp_wait_for_messages', 'whatsapp_check_number', 'whatsapp_contact_info',
-                     'whatsapp_group_info', 'whatsapp_reconnect']:
+                     'whatsapp_group_info', 'whatsapp_reconnect', 'whatsapp_inbox', 'whatsapp_digest',
+                     'whatsapp_alerts', 'whatsapp_list_watches', 'whatsapp_unwatch', 'whatsapp_list_scheduled',
+                     'whatsapp_cancel_scheduled', 'whatsapp_media_text']:
             add(server + ['tools', tool, 'approval_mode'], 'approve')
     slack_servers = [
         ['mcp_servers', name] for name, server in config.get('mcp_servers', {}).items()
