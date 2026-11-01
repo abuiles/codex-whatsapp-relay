@@ -7,7 +7,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 
 import { callTool, DaemonUnavailableError } from "./daemon-client.mjs";
 import { WhatsAppRuntime } from "./runtime.mjs";
-import { createWhatsAppService, textResult, TOOL_DEFINITIONS } from "./whatsapp-service.mjs";
+import { createWhatsAppService, SERVER_INSTRUCTIONS, textResult, TOOL_DEFINITIONS } from "./whatsapp-service.mjs";
 
 const daemonEnabled = process.env.WHATSAPP_DAEMON !== "off";
 let runtime = null;
@@ -41,7 +41,7 @@ async function dispatch(tool, args) {
   }
 }
 
-const server = new McpServer({ name: "whatsapp-relay", version: "0.2.0" });
+const server = new McpServer({ name: "whatsapp-relay", version: "0.2.0" }, { instructions: SERVER_INSTRUCTIONS });
 for (const tool of TOOL_DEFINITIONS) {
   server.tool(tool.name, tool.description, tool.input, args => dispatch(tool, args));
 }

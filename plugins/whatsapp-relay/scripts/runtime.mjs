@@ -508,7 +508,7 @@ export class WhatsAppRuntime {
       }
 
       if (this.state.status === "logged_out") {
-        throw new Error("WhatsApp session was logged out. Re-run the QR auth flow.");
+        throw new Error("WhatsApp session was logged out. Relink with whatsapp_start_auth (pass phoneNumber for a pairing code instead of a QR).");
       }
 
       await delay(250);

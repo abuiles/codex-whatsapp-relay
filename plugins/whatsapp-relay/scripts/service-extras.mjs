@@ -1,6 +1,6 @@
 // Tools beyond reading and sending: attention (digest, watch rules, alerts),
 // media text, status updates, chat management, group admin, presence,
-// blocking, contact cards and scheduled messages. They share the helpers of
+// blocking, contact cards, scheduled messages and drafts. They share the helpers of
 // createWhatsAppService through ctx.
 import fs from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
@@ -24,7 +24,7 @@ export function toUserJid(value, store) {
 
 export function extraTools(ctx) {
   const { runtime, store, textResult, liveSocket, resolveChatOrError, resolveRecipient, cachedMessage, sendContent,
-    refreshCache, freshness, messageSummary, chatSummary, watches, scheduled, mode, mediaInput, recipient, chatTarget } = ctx;
+    sendStored, refreshCache, freshness, messageSummary, chatSummary, watches, scheduled, mode, mediaInput, recipient, chatTarget } = ctx;
 
   // The daemon shares one in-memory copy with its alert engine and scheduler;
   // a cache-only worker rereads the daemon's file on every call.
@@ -53,9 +53,22 @@ export function extraTools(ctx) {
     if (mode === "cache_only") throw new Error(`${what} needs the relay runtime daemon, which is unreachable. Check runtime-daemon.log, then call whatsapp_auth_status.`);
   };
 
+  function sendTime({ sendAt, inMinutes }) {
+    const at = sendAt ? Date.parse(sendAt) : Date.now() + inMinutes * 60_000;
+    if (!Number.isFinite(at)) throw new Error("sendAt is not a valid ISO 8601 time.");
+    if (at < Date.now() + 30_000) throw new Error("sendAt must be at least 30 seconds in the future; leave it out to send now.");
+    return at;
+  }
+
   const engineNote = mode === "daemon"
     ? "engine: running in the relay runtime daemon"
     : "engine: not running in this process (rules fire only while the relay runtime daemon runs)";
+
+  const timing = {
+    sendAt: z.string().optional().describe("ISO 8601 time with offset, e.g. 2026-11-02T09:00:00-05:00"),
+    inMinutes: z.number().min(1).max(60 * 24 * 60).optional(),
+    maxLateMinutes: z.number().min(1).max(24 * 60).optional()
+  };
 
   return [
     {
@@ -428,18 +441,14 @@ export function extraTools(ctx) {
       input: {
         ...recipient,
         text: z.string().min(1).max(4000),
-        sendAt: z.string().optional().describe("ISO 8601 time with offset, e.g. 2026-11-02T09:00:00-05:00"),
-        inMinutes: z.number().min(1).max(60 * 24 * 60).optional(),
-        maxLateMinutes: z.number().min(1).max(24 * 60).optional()
+        ...timing
       },
       mutates: true,
       async handler({ chatId, chatName, phoneNumber, text, sendAt, inMinutes, maxLateMinutes = MAX_LATE_MINUTES }) {
         needDaemon("Scheduling a message");
         await loaded("scheduled");
         if (!!sendAt === !!inMinutes) throw new Error("Provide exactly one of sendAt or inMinutes.");
-        const at = sendAt ? Date.parse(sendAt) : Date.now() + inMinutes * 60_000;
-        if (!Number.isFinite(at)) throw new Error("sendAt is not a valid ISO 8601 time.");
-        if (at < Date.now() + 30_000) throw new Error("sendAt must be at least 30 seconds in the future; use whatsapp_send_message to send now.");
+        const at = sendTime({ sendAt, inMinutes });
         const chat = await resolveRecipient({ chatId, chatName, phoneNumber });
         const item = await scheduled.add({ chatId: chat.id, chatName: chat.displayName, text, sendAt: at, maxLateMinutes });
         return textResult([`status: scheduled`, `id: ${item.id}`, `chat: ${chat.displayName} (${chat.id})`, `send_at: ${new Date(at).toISOString()}`,
@@ -448,30 +457,72 @@ export function extraTools(ctx) {
     },
     {
       name: "whatsapp_list_scheduled",
-      description: "List scheduled messages (pending by default; includeDone shows sent, failed, missed, cancelled and unknown ones with message IDs or errors).",
+      description: "List drafts and scheduled messages (drafts and pending by default; includeDone shows sent, failed, missed, cancelled and unknown ones with message IDs or errors).",
       input: { includeDone: z.boolean().optional() },
       mutates: false,
       async handler({ includeDone = false }) {
         await loaded("scheduled");
         const items = scheduled.list({ includeDone });
         return textResult([`scheduled: ${items.length}`, ...items.map(item =>
-          `- ${item.id} status=${item.status} send_at=${new Date(item.sendAt).toISOString()} chat=${item.chatName} (${item.chatId})` +
+          `- ${item.id} status=${item.status}${item.sendAt ? ` send_at=${new Date(item.sendAt).toISOString()}` : ""} chat=${item.chatName} (${item.chatId})` +
           `${item.messageId ? ` message_id=${item.messageId}` : ""}${item.error ? ` error="${item.error}"` : ""} text=${JSON.stringify(item.text.slice(0, 120))}`)].join("\n"));
       }
     },
     {
       name: "whatsapp_cancel_scheduled",
-      description: "Cancel a pending scheduled message by id.",
+      description: "Cancel a pending scheduled message, or discard a draft, by id.",
       input: { id: z.string().min(1) },
       mutates: false,
       async handler({ id }) {
         needDaemon("Cancelling a scheduled message");
         await loaded("scheduled");
         const item = await scheduled.cancel(id);
-        if (!item) throw new Error(`No scheduled message ${id}.`);
+        if (!item) throw new Error(`No scheduled message or draft ${id}.`);
         return textResult(item.status === "cancelled" ? `cancelled: ${id}` : `Not cancelled: ${id} is already ${item.status}.`, { isError: item.status !== "cancelled" });
+      }
+    },
+    {
+      name: "whatsapp_draft_message",
+      description: "Save a text message as a draft without sending it. Use this whenever the user should see a message before it goes out (replies written for them, anything to a new contact or a group, anything you are unsure of): show the user the draft text, then call whatsapp_send_draft only after they approve. WhatsApp has no drafts for linked devices, so drafts live in the relay, not in the phone app.",
+      input: {
+        ...recipient,
+        text: z.string().min(1).max(4000),
+        replyToMessageId: z.string().min(1).optional(),
+        mentions: z.array(z.string().min(5)).max(50).optional()
+      },
+      mutates: false,
+      async handler({ chatId, chatName, phoneNumber, text, replyToMessageId, mentions }) {
+        needDaemon("Saving a draft");
+        await loaded("scheduled");
+        const chat = await resolveRecipient({ chatId, chatName, phoneNumber });
+        if (replyToMessageId) cachedMessage(chat, replyToMessageId);
+        const item = await scheduled.add({ status: "draft", sendAt: null, chatId: chat.id, chatName: chat.displayName, text,
+          ...(replyToMessageId ? { replyToMessageId } : {}), ...(mentions?.length ? { mentions } : {}) });
+        return textResult([`status: draft_saved`, `id: ${item.id}`, `chat: ${chat.displayName} (${chat.id})`,
+          ...(replyToMessageId ? [`reply_to: ${replyToMessageId}`] : []), `text: ${JSON.stringify(text)}`,
+          "Nothing was sent. Show this draft to the user; after they approve, call whatsapp_send_draft with this id (optionally with edited text or a send time). whatsapp_cancel_scheduled discards it."].join("\n"));
+      }
+    },
+    {
+      name: "whatsapp_send_draft",
+      description: "Send a draft the user has approved, now or at sendAt/inMinutes. text replaces the draft text first (the user's edits). Never call this for a draft the user has not seen.",
+      input: { id: z.string().min(1), text: z.string().min(1).max(4000).optional(), ...timing },
+      mutates: true,
+      async handler({ id, text, sendAt, inMinutes, maxLateMinutes = MAX_LATE_MINUTES }) {
+        needDaemon("Sending a draft");
+        await loaded("scheduled");
+        if (sendAt && inMinutes) throw new Error("Provide at most one of sendAt or inMinutes.");
+        if (sendAt || inMinutes) {
+          const at = sendTime({ sendAt, inMinutes });
+          const item = await scheduled.scheduleDraft(id, { text, sendAt: at, maxLateMinutes });
+          return textResult([`status: scheduled`, `id: ${item.id}`, `chat: ${item.chatName} (${item.chatId})`, `send_at: ${new Date(at).toISOString()}`].join("\n"));
+        }
+        const { item, result } = await scheduled.sendDraft(id, { text, send: sendStored });
+        if (result.retry) return textResult([`status: rate_limited`, `id: ${id}`, `reason: ${result.error}`, "Nothing was sent; the draft is kept. Try again later."].join("\n"), { isError: true });
+        if (!result.ok) return textResult([`status: failed`, `id: ${id}`, `error: ${result.error}`, "The draft is marked failed; check the chat before sending it again."].join("\n"), { isError: true });
+        return textResult([`status: submitted`, `id: ${id}`, `chat: ${item.chatName} (${item.chatId})`,
+          ...(result.messageId ? [`message_id: ${result.messageId}`] : ["via: controller_bridge"]), "delivery: not_yet_verified"].join("\n"));
       }
     }
   ];
 }
-

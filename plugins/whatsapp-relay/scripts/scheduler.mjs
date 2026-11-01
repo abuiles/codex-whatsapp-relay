@@ -1,5 +1,6 @@
-// Scheduled messages, persisted and sent by the runtime daemon's watcher.
-// A send is never retried: an entry moves to "sending" before the call, so a
+// Scheduled messages and drafts, persisted and sent by the runtime daemon.
+// A draft has no sendAt and is sent only by whatsapp_send_draft, after the
+// user has seen it. A send is never retried: an entry moves to "sending" before the call, so a
 // crash mid-send leaves it as "unknown" instead of sending it twice.
 import { randomUUID } from "node:crypto";
 
@@ -22,7 +23,7 @@ export class ScheduledStore extends JsonFile {
 
   async cancel(id) {
     const item = this.data.items.find(entry => entry.id === id);
-    if (!item || item.status !== "pending") return item ?? null;
+    if (!item || !["pending", "draft"].includes(item.status)) return item ?? null;
     item.status = "cancelled";
     item.cancelledAt = new Date().toISOString();
     await this.save();
@@ -30,8 +31,42 @@ export class ScheduledStore extends JsonFile {
   }
 
   list({ includeDone = false } = {}) {
-    return this.data.items.filter(item => includeDone || ["pending", "sending"].includes(item.status))
-      .sort((a, b) => a.sendAt - b.sendAt);
+    return this.data.items.filter(item => includeDone || ["draft", "pending", "sending"].includes(item.status))
+      .sort((a, b) => (a.sendAt ?? 0) - (b.sendAt ?? 0));
+  }
+
+  draft(id) {
+    const item = this.data.items.find(entry => entry.id === id);
+    if (!item) throw new Error(`No draft ${id}. whatsapp_list_scheduled lists drafts.`);
+    if (item.status !== "draft") throw new Error(`${id} is ${item.status}, not a draft; nothing was sent.`);
+    return item;
+  }
+
+  // Same bookkeeping as a scheduled send: "sending" before the call, so a
+  // crash leaves "unknown" rather than a draft that could go out twice.
+  async sendDraft(id, { text, send }) {
+    const item = this.draft(id);
+    if (text !== undefined) item.text = text;
+    item.status = "sending";
+    await this.save();
+    const result = await send(item).catch(error => ({ ok: false, error: error.message }));
+    if (result.retry) { item.status = "draft"; item.error = result.error; }
+    else {
+      item.status = result.ok ? "sent" : "failed";
+      item.sentAt = new Date().toISOString();
+      if (result.messageId) item.messageId = result.messageId;
+      if (result.error) item.error = result.error;
+    }
+    await this.save();
+    return { item, result };
+  }
+
+  async scheduleDraft(id, { text, sendAt, maxLateMinutes }) {
+    const item = this.draft(id);
+    if (text !== undefined) item.text = text;
+    Object.assign(item, { status: "pending", sendAt, maxLateMinutes });
+    await this.save();
+    return item;
   }
 
   // Call once at startup: an entry left in "sending" by a crash has an unknown outcome.

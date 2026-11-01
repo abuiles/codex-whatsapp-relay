@@ -256,6 +256,14 @@ const alerts = new AlertEngine({
 });
 await alerts.start().catch(error => console.error(`[${new Date().toISOString()}] alert engine start failed: ${error.message}`));
 runtime.on("messages.upsert", () => { alerts.tick(); });
+// WhatsApp drops a linked device after ~14 days with the phone offline, or
+// when it is removed on the phone. Say so once, instead of every tool failing.
+runtime.on("connection.update", update => {
+  if (update.connection !== "close" || runtime.state.status !== "logged_out") return;
+  alerts.systemAlert("logged_out", "WhatsApp relay logged out",
+    "WhatsApp unlinked this device. Ask Codex to relink (whatsapp_start_auth, with phoneNumber for a pairing code).")
+    .catch(error => console.error(`[${new Date().toISOString()}] logout alert failed: ${error.message}`));
+});
 
 // Scheduled messages go through the same send tool (and its rate limits).
 await scheduled.ensureLoaded();
@@ -267,10 +275,7 @@ function runScheduled() {
     send: async item => {
       inFlight += 1;
       try {
-        const result = await service.call("whatsapp_send_message", { chatId: item.chatId, text: item.text });
-        const text = result.content?.[0]?.text ?? "";
-        if (result.isError) return { ok: false, retry: text.startsWith("status: rate_limited"), error: text.split("\n").slice(0, 2).join(" ") };
-        return { ok: true, messageId: /message_id: (\S+)/.exec(text)?.[1] ?? null };
+        return await service.sendStored(item);
       } finally {
         inFlight -= 1;
       }

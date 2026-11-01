@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — drafts, logout alerts, and steering away from the UI
+
+- `whatsapp_draft_message` saves a message without sending it; `whatsapp_send_draft` sends it after approval (now or scheduled, optionally with edited text) through the normal send path and its rate limits. A crash mid-send leaves the draft `unknown`, never resent.
+- The runtime daemon shows a desktop notification and records an alert when WhatsApp logs the device out, instead of every later tool call failing silently.
+- `whatsapp_read_messages` says when the cache ran out and points to `whatsapp_sync_history`.
+- The MCP server now sends instructions, and the skill description and rules were rewritten, so Codex uses the relay tools for WhatsApp instead of driving WhatsApp Desktop through computer use, which is what it had kept doing for everyday sends.
+
 ### Added — link with a pairing code
 
 - `whatsapp_start_auth` takes an optional `phoneNumber` and returns an 8-character pairing code to type on the phone (Linked Devices -> Link with phone number instead) when QR scanning fails. Repeated calls on the same attempt return the same code. `npm run whatsapp:auth -- --phone <number>` does the same in a terminal.

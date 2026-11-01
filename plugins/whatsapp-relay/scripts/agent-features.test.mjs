@@ -241,6 +241,17 @@ test("alert engine starts at the present, batches matches and notifies once per 
   assert.equal(f.watches.list()[0].firedCount, 1);
 });
 
+test("a logout alert notifies and is listed by whatsapp_alerts", async t => {
+  const f = await engineFixture(t, []);
+  await f.engine.systemAlert("logged_out", "WhatsApp relay logged out", "WhatsApp unlinked this device.");
+  assert.deepEqual(f.notified, [{ title: "WhatsApp relay logged out", body: "WhatsApp unlinked this device." }]);
+  const { alerts } = await readAlerts({ alertsPath: f.alertsPath });
+  assert.equal(alerts[0].ruleId, "system");
+  assert.equal(alerts[0].label, "logged_out");
+  assert.equal(alerts[0].outcome, "notified");
+  assert.equal(alerts[0].reason, "WhatsApp unlinked this device.");
+});
+
 test("codex rules run one at a time and defer instead of stacking", async t => {
   const f = await engineFixture(t, [
     { label: "a", action: "codex", chatId: pn, cooldownMinutes: 0 },
@@ -454,6 +465,65 @@ test("schedule_message validates time and lists and cancels entries", async t =>
   assert.match(text(await service.call("whatsapp_list_scheduled", {})), /Happy birthday/);
   assert.match(text(await service.call("whatsapp_cancel_scheduled", { id })), /cancelled/);
   assert.match(text(await service.call("whatsapp_list_scheduled", {})), /scheduled: 0/);
+});
+
+test("a draft sends nothing until send_draft, which sends it once with the user's edits", async t => {
+  const { service, socket } = await fixture(t);
+  const saved = await service.call("whatsapp_draft_message", { chatId: pn, text: "See you at 1?", replyToMessageId: "in2" });
+  assert.match(text(saved), /status: draft_saved/);
+  assert.match(text(saved), /Nothing was sent/);
+  assert.equal(socket.calls.length, 0);
+  const id = /id: (\S+)/.exec(text(saved))[1];
+  assert.match(text(await service.call("whatsapp_list_scheduled", {})), new RegExp(`${id} status=draft chat=`));
+
+  const sent = await service.call("whatsapp_send_draft", { id, text: "See you at 12:30?" });
+  assert.equal(sent.isError, false, text(sent));
+  assert.match(text(sent), /status: submitted/);
+  assert.equal(socket.calls.length, 1);
+  assert.equal(socket.calls[0].args[1].text, "See you at 12:30?");
+  assert.equal(socket.calls[0].args[2].quoted.key.id, "in2");
+
+  const again = await service.call("whatsapp_send_draft", { id });
+  assert.equal(again.isError, true);
+  assert.match(text(again), /is sent, not a draft/);
+  assert.equal(socket.calls.length, 1);
+});
+
+test("a rate-limited draft stays a draft; a scheduled or discarded draft never sends now", async t => {
+  const { service, socket } = await fixture(t, { limits: { globalPerMinute: 100, chatPerMinute: 1, newChatsPerHour: 100 } });
+  await service.call("whatsapp_send_message", { chatId: pn, text: "first" });
+  const id = /id: (\S+)/.exec(text(await service.call("whatsapp_draft_message", { chatId: pn, text: "second" })))[1];
+  const refused = await service.call("whatsapp_send_draft", { id });
+  assert.match(text(refused), /status: rate_limited/);
+  assert.match(text(await service.call("whatsapp_list_scheduled", {})), new RegExp(`${id} status=draft`));
+
+  const scheduled = await service.call("whatsapp_send_draft", { id, inMinutes: 30 });
+  assert.match(text(scheduled), /status: scheduled/);
+  assert.match(text(await service.call("whatsapp_list_scheduled", {})), new RegExp(`${id} status=pending send_at=`));
+
+  const other = /id: (\S+)/.exec(text(await service.call("whatsapp_draft_message", { chatId: pn, text: "never" })))[1];
+  assert.match(text(await service.call("whatsapp_cancel_scheduled", { id: other })), /cancelled/);
+  assert.equal((await service.call("whatsapp_send_draft", { id: other })).isError, true);
+  assert.equal(socket.calls.length, 1);
+
+  const worker = await fixture(t, { mode: "cache_only" });
+  assert.match(text(await worker.service.call("whatsapp_draft_message", { chatId: pn, text: "x" })), /needs the relay runtime daemon/);
+});
+
+test("read_messages says when the cache runs out and points to sync_history", async t => {
+  const { service } = await fixture(t);
+  assert.match(text(await service.call("whatsapp_read_messages", { chatId: pn, limit: 20 })), /older: none cached before in1; whatsapp_sync_history/);
+  assert.doesNotMatch(text(await service.call("whatsapp_read_messages", { chatId: pn, limit: 2 })), /older:/);
+});
+
+test("server instructions and the skill name only tools that exist", async () => {
+  const { SERVER_INSTRUCTIONS, TOOL_DEFINITIONS } = await import("./whatsapp-service.mjs");
+  const names = new Set(TOOL_DEFINITIONS.map(tool => tool.name));
+  const skill = await fs.readFile(new URL("../skills/whatsapp-relay/SKILL.md", import.meta.url), "utf8");
+  for (const source of [SERVER_INSTRUCTIONS, skill]) {
+    for (const [name] of source.matchAll(/whatsapp_[a-z_]+/g)) assert.ok(names.has(name), `${name} is not a tool`);
+  }
+  assert.match(SERVER_INSTRUCTIONS, /Never operate WhatsApp Desktop/);
 });
 
 test("digest and threadOf read the cache through the tools", async t => {

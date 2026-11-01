@@ -441,6 +441,9 @@ thread open):
 - `whatsapp_digest` — what needs you: unread chats, @mentions and replies to you, questions you have not answered. Muted chats sink.
 - `whatsapp_watch` / `whatsapp_unwatch` / `whatsapp_list_watches` — persisted rules (chat, sender, keywords, regex, chat kind, mentions of you) that record, show a macOS notification, or start a background `codex exec` run. Matches are batched for 15 s; Codex runs are one at a time, at most 6 an hour (`WHATSAPP_CODEX_RUNS_PER_HOUR`) and 5 minutes apart per rule. `whatsapp_alerts` reads what fired, with a cursor.
 - `whatsapp_schedule_message` / `whatsapp_list_scheduled` / `whatsapp_cancel_scheduled` — sent by the daemon at the time given; marked `missed` (never sent late) if the daemon was offline for more than `maxLateMinutes`, and `unknown` (never resent) if it stopped mid-send.
+- `whatsapp_draft_message` / `whatsapp_send_draft` — WhatsApp has no drafts for linked devices, so the relay keeps its own. A draft sends nothing until `whatsapp_send_draft`, which can take the user's edited text and send now or at a time. Codex is told to draft anything it wrote, or anything to a new contact or a group, and send only after you approve. Drafts appear in `whatsapp_list_scheduled`; `whatsapp_cancel_scheduled` discards one.
+- Logged out: when WhatsApp unlinks the device (about 14 days with the phone offline, or removed on the phone), the daemon shows a macOS notification and records a `system` entry in `whatsapp_alerts`. Relink with `whatsapp_start_auth`, with `phoneNumber` for a pairing code.
+- The MCP server sends instructions with every connection telling the model to use these tools rather than operating WhatsApp Desktop or WhatsApp Web through computer use.
 
 Everything else the phone can do:
 
