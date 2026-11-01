@@ -13,6 +13,7 @@ const { AlertEngine, WatchStore, matchRule, readAlerts } = await import("./watch
 const { ScheduledStore } = await import("./scheduler.mjs");
 const { SendLimiter } = await import("./send-limiter.mjs");
 const { mediaKind } = await import("./media-text.mjs");
+const { BugReporter } = await import("./bug-reports.mjs");
 
 test.after(() => fs.rm(dataDir, { recursive: true, force: true }));
 
@@ -87,7 +88,8 @@ async function fixture(t, { mode = "daemon", limits } = {}) {
     watches: new WatchStore(path.join(directory, "watches.json")),
     scheduled: new ScheduledStore(path.join(directory, "scheduled.json")),
     alertsPath: path.join(directory, "alerts.jsonl"),
-    sendLimiter: new SendLimiter({ limits: limits ?? { globalPerMinute: 100, chatPerMinute: 100, newChatsPerHour: 100 } })
+    sendLimiter: new SendLimiter({ limits: limits ?? { globalPerMinute: 100, chatPerMinute: 100, newChatsPerHour: 100 } }),
+    bugReporter: new BugReporter({ file: path.join(directory, "bug-reports.jsonl") })
   });
   return { service, store, socket, runtime, directory };
 }
@@ -514,6 +516,37 @@ test("read_messages says when the cache runs out and points to sync_history", as
   const { service } = await fixture(t);
   assert.match(text(await service.call("whatsapp_read_messages", { chatId: pn, limit: 20 })), /older: none cached before in1; whatsapp_sync_history/);
   assert.doesNotMatch(text(await service.call("whatsapp_read_messages", { chatId: pn, limit: 2 })), /older:/);
+});
+
+const readReports = async directory => (await fs.readFile(path.join(directory, "bug-reports.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+
+test("a crashing tool files a redacted bug report once; handler errors do not", async t => {
+  const { service, runtime, directory } = await fixture(t);
+  assert.equal((await service.call("whatsapp_read_messages", { chatId: "nobody-here" })).isError, true);
+  await assert.rejects(fs.readFile(path.join(directory, "bug-reports.jsonl")), { code: "ENOENT" });
+
+  runtime.summary = () => { const missing = undefined; return missing.status; };
+  const crashed = await service.call("whatsapp_auth_status", {});
+  assert.equal(crashed.isError, true);
+  assert.match(text(crashed), /TypeError/);
+  assert.match(text(crashed), /bug_report: bug-\S+ \(filed automatically/);
+  assert.match(text(await service.call("whatsapp_auth_status", {})), /bug_report: not filed \(duplicate/);
+  const [report, ...rest] = await readReports(directory);
+  assert.equal(rest.length, 0);
+  assert.equal(report.source, "auto");
+  assert.equal(report.tool, "whatsapp_auth_status");
+  assert.match(report.stack, /at /);
+});
+
+test("whatsapp_report_bug stores what the agent saw without message text", async t => {
+  const { service, directory } = await fixture(t);
+  const filed = await service.call("whatsapp_report_bug", { tool: "whatsapp_send_message", problem: "returned success but no message_id",
+    args: { chatId: pn, text: "secret lunch plans", mentions: [other] } });
+  assert.match(text(filed), /status: filed/);
+  const [report] = await readReports(directory);
+  assert.equal(report.source, "agent");
+  assert.deepEqual(report.args, { chatId: pn, text: "<18 chars>", mentions: [other] });
+  assert.doesNotMatch(JSON.stringify(report), /secret/);
 });
 
 test("server instructions and the skill name only tools that exist", async () => {

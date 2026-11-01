@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — bug reports a coding agent can act on
+
+- `whatsapp_report_bug` lets Codex report a relay bug (tool, arguments, what went wrong) to `bug-reports.jsonl` in the data directory, so a coding agent watching the file can fix it without the user relaying it.
+- A tool that crashes with a programming error (`TypeError`, `ReferenceError`, ...) files a report by itself and says so in its result. Errors a tool raises on purpose, like an unknown chat, are not reported.
+- Reports replace message text with its length (IDs and JIDs are kept), repeat reports within 10 minutes are skipped, and at most 20 are filed an hour.
+
 ### Added — drafts, logout alerts, and steering away from the UI
 
 - `whatsapp_draft_message` saves a message without sending it; `whatsapp_send_draft` sends it after approval (now or scheduled, optionally with edited text) through the normal send path and its rate limits. A crash mid-send leaves the draft `unknown`, never resent.

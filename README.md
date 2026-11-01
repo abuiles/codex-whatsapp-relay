@@ -444,6 +444,7 @@ thread open):
 - `whatsapp_draft_message` / `whatsapp_send_draft` — WhatsApp has no drafts for linked devices, so the relay keeps its own. A draft sends nothing until `whatsapp_send_draft`, which can take the user's edited text and send now or at a time. Codex is told to draft anything it wrote, or anything to a new contact or a group, and send only after you approve. Drafts appear in `whatsapp_list_scheduled`; `whatsapp_cancel_scheduled` discards one.
 - Logged out: when WhatsApp unlinks the device (about 14 days with the phone offline, or removed on the phone), the daemon shows a macOS notification and records a `system` entry in `whatsapp_alerts`. Relink with `whatsapp_start_auth`, with `phoneNumber` for a pairing code.
 - The MCP server sends instructions with every connection telling the model to use these tools rather than operating WhatsApp Desktop or WhatsApp Web through computer use.
+- `whatsapp_report_bug` — Codex reports a relay bug (tool, arguments, what went wrong) to `bug-reports.jsonl` in the data directory. A tool that crashes with a programming error files one by itself. Message text in arguments is replaced by its length. Point a coding agent at the file (for example `tail -F` it from a Claude Code or Codex session) to have reported bugs fixed without relaying them by hand.
 
 Everything else the phone can do:
 

@@ -24,7 +24,7 @@ export function toUserJid(value, store) {
 
 export function extraTools(ctx) {
   const { runtime, store, textResult, liveSocket, resolveChatOrError, resolveRecipient, cachedMessage, sendContent,
-    sendStored, refreshCache, freshness, messageSummary, chatSummary, watches, scheduled, mode, mediaInput, recipient, chatTarget } = ctx;
+    sendStored, refreshCache, freshness, messageSummary, chatSummary, watches, scheduled, bugReporter, mode, mediaInput, recipient, chatTarget } = ctx;
 
   // The daemon shares one in-memory copy with its alert engine and scheduler;
   // a cache-only worker rereads the daemon's file on every call.
@@ -171,6 +171,23 @@ export function extraTools(ctx) {
           for (const m of alert.messages ?? []) lines.push(`    [${iso(m.timestamp)}] ${m.chatName} id=${m.id} ${m.sender}: ${m.text}`);
         }
         return textResult(lines.join("\n"));
+      }
+    },
+    {
+      name: "whatsapp_report_bug",
+      description: "Report a bug in this WhatsApp relay: a tool crashed, returned something wrong, or cannot do what its description says. A coding agent watching the reports fixes the relay. Say which tool and arguments you used and what went wrong; message text in args is replaced by its length, so the report never contains anyone's messages. Sends nothing to WhatsApp.",
+      input: {
+        tool: z.string().min(1).optional().describe("The whatsapp_* tool that misbehaved"),
+        args: z.record(z.string(), z.unknown()).optional().describe("The arguments you passed"),
+        problem: z.string().min(1).max(2000).describe("What went wrong, including the error text if there was one"),
+        expected: z.string().max(1000).optional().describe("What you expected instead")
+      },
+      mutates: false,
+      async handler({ tool, args, problem, expected }) {
+        const filed = await bugReporter.report({ source: "agent", tool, args, problem, expected });
+        if (!filed.id) return textResult(`status: not_filed\nreason: ${filed.skipped}\nCarry on with another approach; the earlier report covers this.`);
+        return textResult([`status: filed`, `bug_report: ${filed.id}`,
+          "Tell the user it was reported, and carry on another way with the whatsapp_* tools; do not switch to the WhatsApp app."].join("\n"));
       }
     },
     {
