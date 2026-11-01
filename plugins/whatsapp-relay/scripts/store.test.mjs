@@ -376,6 +376,19 @@ test("unread counts offline arrivals, ignores chats.update deltas, and resets on
   assert.equal(store.data.chats[pn].markedUnread, false);
 });
 
+test("a message sent through the relay reads the chat, even when its echo arrives later", async t => {
+  const store = await fixture(t);
+  store.upsertChat({ id: pn, name: "Synthetic" });
+  store.ingestMessage(message("in1", pn, 200, "question"));
+  assert.equal(store.data.chats[pn].unreadCount, 1);
+  const sent = { key: { id: "out1", remoteJid: pn, fromMe: true }, messageTimestamp: 201, message: { conversation: "answer" } };
+  store.ingestSent(sent);
+  assert.equal(store.data.chats[pn].unreadCount, 0);
+  // WhatsApp echoes our own send back through messages.upsert; it must not count.
+  store.ingestMessage(sent);
+  assert.equal(store.data.chats[pn].unreadCount, 0);
+});
+
 test("the inbox cursor follows arrival order, so old-timestamp backlog is not skipped", async t => {
   const store = await fixture(t);
   store.ingestMessage(message("a", pn, 1000, "live"));

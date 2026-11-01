@@ -263,7 +263,7 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
 
   function submitted(chat, sent, extra = []) {
     if (!sent?.key?.id) throw new Error("No message ID returned; outcome unknown. Do not automatically retry.");
-    store.ingestMessage(sent, { incrementUnread: false });
+    store.ingestSent(sent);
     return textResult([`status: submitted`, `chat: ${chat.displayName} (${chat.id})`, `message_id: ${sent.key.id}`, ...extra, "delivery: not_yet_verified"].join("\n"));
   }
 

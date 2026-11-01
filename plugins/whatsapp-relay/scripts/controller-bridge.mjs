@@ -2015,7 +2015,7 @@ export class WhatsAppControllerBridge {
           const sent = await socket.sendMessage(command.payload.chatId, media.content);
           if (!sent?.key?.id) throw new Error("Media submission outcome unknown; verify before any retry.");
           this.rememberOutgoingMessage(sent.key.id);
-          this.runtime.store.ingestMessage(sent, { incrementUnread: false });
+          this.runtime.store.ingestSent(sent);
         } catch (error) {
           // A send failure may happen after acceptance; quarantine rather than resend.
           error.retryable = false;
@@ -3674,7 +3674,7 @@ export class WhatsAppControllerBridge {
         const sent = await socket.sendMessage(chatId, { text: part });
         if (!sent?.key?.id) throw new Error("Text submission outcome unknown; verify before any retry.");
         this.rememberOutgoingMessage(sent.key.id);
-        this.runtime.store.ingestMessage(sent, { incrementUnread: false });
+        this.runtime.store.ingestSent(sent);
       } catch (error) {
         error.retryable = false;
         throw error;

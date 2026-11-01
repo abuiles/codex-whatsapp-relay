@@ -323,6 +323,13 @@ export class WhatsAppStore {
     if (changed) this.scheduleSave();
   }
 
+  // A message this relay sent reads its chat, as replying does on the phone.
+  // The echo from messages.upsert is then a duplicate and changes nothing.
+  ingestSent(message) {
+    this.ingestMessage(message, { incrementUnread: false });
+    if (message?.key?.remoteJid) this.markChatRead(message.key.remoteJid);
+  }
+
   markChatRead(chatId) {
     const chat = this.data.chats[this.canonicalJid(chatId)];
     if (!chat) return;

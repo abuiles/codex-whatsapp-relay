@@ -21,7 +21,7 @@ test("controller media dispatch uses its existing socket and caches the returned
   const context = {
     runtime: { ensureConnected: async () => ({ sendMessage: async (id, content) => {
       assert.equal(id, payload.chatId); assert.ok(Buffer.isBuffer(content.image)); return { key: { id: "synthetic-media" } };
-    } }), store: { ingestMessage: message => events.push(message.key.id) } },
+    } }), store: { ingestSent: message => events.push(message.key.id) } },
     rememberOutgoingMessage: id => events.push(id)
   };
   await WhatsAppControllerBridge.prototype.handleOutboxCommand.call(context, { type: "send_media", payload });
@@ -47,7 +47,7 @@ test("a partial text submission preserves successful IDs and quarantines the fai
   const remembered = [];
   const context = { runtime: { ensureConnected: async () => ({ sendMessage: async () => {
     calls++; if (calls === 2) throw new Error("unknown second outcome"); return { key: { id: "part-one" } };
-  } }), store: { ingestMessage() {} } }, rememberOutgoingMessage: id => remembered.push(id) };
+  } }), store: { ingestSent() {} } }, rememberOutgoingMessage: id => remembered.push(id) };
   await assert.rejects(WhatsAppControllerBridge.prototype.sendTextMessage.call(context, "10000000000@s.whatsapp.net", "x".repeat(4000)), error => error.retryable === false);
   assert.equal(calls, 2);
   assert.deepEqual(remembered, ["part-one"]);
