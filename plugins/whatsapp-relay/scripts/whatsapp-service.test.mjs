@@ -212,3 +212,15 @@ test("whatsapp_inbox groups new arrivals by chat and hands back a cursor; stale 
   assert.match(next, /late/);
   assert.doesNotMatch(next, /g1/);
 });
+
+test("recover skips server notices and asks the phone only for real undecryptable messages", async t => {
+  const { service, socket, store } = await fixture(t);
+  const now = Math.floor(Date.now() / 1000);
+  socket.requestPlaceholderResend = async key => { socket.sent.push({ resend: key.id }); };
+  store.ingestMessage({ key: { id: "3EB0AA", remoteJid: group, fromMe: false, participant: pn }, messageTimestamp: now, messageStubType: 2 });
+  store.data.messages[group].push({ id: "2491793518", chatId: group, fromMe: false, timestamp: now, text: "", messageType: "unknown" });
+  assert.match(text(await service.call("whatsapp_read_messages", { chatId: group })), /\[system notice: /);
+  const result = text(await service.call("whatsapp_recover_messages", {}));
+  assert.match(result, /count: 1\n/);
+  assert.deepEqual(socket.sent.map(s => s.resend), ["3EB0AA"]);
+});

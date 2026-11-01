@@ -69,10 +69,17 @@ export function messageSummary(message, { withChat = false } = {}) {
   return `- [${formatTimestamp(message.timestamp)}] id=${message.id}${where} status=${proto.WebMessageInfo.Status[message.deliveryStatus] ?? "unknown"} ${author}: ${messageBody(message)}${media}${reply}${edited}${reactions}${receipts}`;
 }
 
+// Server-generated group notices (joins, setting changes) get numeric ids;
+// messages people send get hex ids. Notices cached before stub recording are
+// blank, and the phone has nothing to resend for them.
+const isServerNoticeId = id => /^\d+$/.test(id ?? "");
+
 function messageBody(message) {
   if (message.text) return message.text;
   if (message.messageType === "undecryptable") return "[undecryptable: not decrypted on this device yet; whatsapp_recover_messages asks your phone to resend it]";
-  if (message.messageType === "unknown" && !message.media) return "[unavailable: no content was cached for this message]";
+  if (message.messageType === "unknown" && !message.media) {
+    return isServerNoticeId(message.id) ? "[system notice: details were not cached]" : "[unavailable: no content was cached for this message]";
+  }
   return `[${message.messageType}]`;
 }
 
@@ -643,7 +650,7 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
         const candidates = (chat ? [chat.id] : Object.keys(store.data.messages))
           .flatMap(id => store.data.messages[id] ?? [])
           .filter(m => !m.fromMe && !m.text && !m.media && !m.rawMessage && (m.timestamp ?? 0) >= cutoff &&
-            (m.messageType === "undecryptable" || m.messageType === "unknown") && (!wanted || wanted.has(m.id)))
+            (m.messageType === "undecryptable" || (m.messageType === "unknown" && !isServerNoticeId(m.id))) && (!wanted || wanted.has(m.id)))
           .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
           .slice(0, limit);
         if (!candidates.length) return textResult("status: nothing_to_recover\ncount: 0");
