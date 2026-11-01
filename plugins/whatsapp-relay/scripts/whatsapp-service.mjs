@@ -565,6 +565,11 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
           .filter(chat => kind === "all" || (kind === "group") === chat.id.endsWith("@g.us"))
           .slice(0, limit);
         const state = await freshness();
+        if (!chats.length && !query) {
+          // Pin and mute state arrives with history sync or when it changes on the phone.
+          return textResult([...state, "chats_matched: 0",
+            ...(filter === "pinned" || filter === "muted" ? [`note: ${filter} state is known only for chats synced or changed since this relay version; an empty list does not prove there are none`] : [])].join("\n"));
+        }
         if (!chats.length) {
           return textResult([...state, "lookup_result: no_cached_match", "No cached chats or direct contacts matched the requested filter.", missingHistoryHint,
             "next_step: try a shorter name, a phone number, or whatsapp_check_number"].join("\n"));
