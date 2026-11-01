@@ -367,6 +367,111 @@ npm run whatsapp:tts:smoke -- --provider chatterbox-turbo --language-id es --tex
 
 The Chatterbox path is slower than `say` because the Python process and model are loaded locally for each generated reply. It is now the preferred provider. English uses Turbo, while supported non-English replies route through the multilingual model. If you prefer the lighter macOS voice path everywhere, set `WHATSAPP_RELAY_TTS_PROVIDER=system`. If you only want the macOS fallback for non-English replies, set `WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH=0`. On machines where Perth's native implicit watermarker is unavailable, the helper falls back to Perth's dummy watermarker so local synthesis still works.
 
+## MCP media, history and receipts
+
+The local MCP server now includes `whatsapp_prepare_media`, `whatsapp_send_media`,
+`whatsapp_download_media`, and `whatsapp_message_status`. Prepare a local file
+first, review its absolute path, SHA-256 and caption, then send with that hash
+as `expectedSha256`. Supported types are image, video, audio, document and WebP
+sticker. Voice notes require an Ogg Opus file. The relay caps a single file at
+100 MiB. Media preparation does not upload or send a message.
+
+Message reads expose IDs and cached media metadata. Downloads require a retained
+raw message envelope; older cache entries may lack one. Downloaded files stay
+under the private runtime data directory, small images return inline previews,
+and view-once media is excluded. A submitted message ID does not prove delivery;
+`whatsapp_message_status` reports only the acknowledgements the cache received.
+
+The existing `whatsapp_send_message` tool also accepts a `media` object with the
+same fields as `whatsapp_send_media`; leave `text` empty for media and use
+`media.caption` where applicable. The existing `whatsapp_read_messages` tool can
+select an exact `messageId`; with `downloadMedia: true` it downloads that media.
+These options use the same native MCP connection when a host caches older tool
+names. No text command or encoded-message workaround is used.
+
+On supported Node.js versions, SIGHUP flushes the cache and replaces only the
+MCP worker with `process.execve`, retaining its stdio connection. Tool-list-change
+notifications announce the updated schema. This does not restart Codex or other
+MCP workers. Use only for an explicitly authorized, identified WhatsApp worker.
+Wait for in-flight tool calls to finish first; unfinished calls are not replayed.
+
+Read results explicitly report `source: local_cache` and unverified history
+completeness. Phone/LID mappings are merged, but neither an active socket nor a
+successful cached read establishes that all latest phone history has arrived.
+History refresh records its stanza ID in a private metadata journal before
+dispatch. `whatsapp_sync_history` accepts `statusOnly: true` and an optional
+`requestId` to check late responses without contacting the phone again. A timeout
+keeps the original request unresolved; the same anchor is not automatically
+retried. Only a response with the matching session ID confirms that request.
+Message reads expose actual receipt counts. A server ACK confirms server receipt;
+it does not establish delivery to the recipient's phone or audio playback.
+`npm install` reapplies the reviewed pairing and pre-login acknowledgement
+backports to the pinned Baileys rc14 dependency. Review `scripts/patch-baileys.mjs`
+before changing the Baileys version. These fixes are reapplied on every install of the pinned dependency.
+
+## Headless tools and the runtime daemon
+
+Codex starts one MCP worker per thread. WhatsApp allows one live socket per
+linked device, so the workers no longer connect themselves: the first tool call
+starts `runtime-daemon.mjs`, a single background process per data directory that
+owns the socket, and every worker proxies to it over a private Unix socket
+(`runtime.sock`, mode 0600). The daemon reconnects on its own after network
+drops, hands the session to the controller bridge or the terminal QR flow while
+they run, restarts itself after the relay scripts are updated, and exits after
+ten idle minutes when no credentials exist. If it cannot be reached, workers
+answer read-only tools from the cache (`runtime_mode: cache_only`) and refuse to
+send. Set `WHATSAPP_DAEMON=off` to keep the previous in-process behaviour.
+
+Workers reload themselves in place when the scripts change (same process, so
+the thread keeps its connection) and tell Codex the tool list changed, so open
+threads see new tools without a restart. `WHATSAPP_MCP_AUTO_RELOAD=off` turns
+this off. Auth files are written atomically, and when chat-state sync is
+missing a key the daemon asks your phone for it.
+
+Beyond chat listing, reading and sending, the MCP covers what an agent would
+otherwise need the WhatsApp UI for:
+
+- `whatsapp_search_messages` — full-text search across cached chats.
+- `whatsapp_inbox` — everything new across chats since a cursor (or every unread chat), including offline backlog; optional long-poll.
+- `whatsapp_wait_for_messages` — long-poll for new messages from a timestamp cursor.
+- `whatsapp_recover_messages` — ask your phone to resend messages shown as `[undecryptable]`.
+- `phoneNumber` recipients (verified with WhatsApp first) and `replyToMessageId` quoting.
+- `whatsapp_react`, `whatsapp_edit_message`, `whatsapp_delete_message`, `whatsapp_forward_message`, `whatsapp_mark_read`.
+- `whatsapp_send_poll`, `whatsapp_send_location`.
+- `whatsapp_check_number`, `whatsapp_contact_info`, `whatsapp_group_info`.
+- `whatsapp_reconnect` — reopen the saved session after it was replaced or dropped.
+
+Attention and automation (run inside the daemon, so they work with no Codex
+thread open):
+
+- `whatsapp_digest` — what needs you: unread chats, @mentions and replies to you, questions you have not answered. Muted chats sink.
+- `whatsapp_watch` / `whatsapp_unwatch` / `whatsapp_list_watches` — persisted rules (chat, sender, keywords, regex, chat kind, mentions of you) that record, show a macOS notification, or start a background `codex exec` run. Matches are batched for 15 s; Codex runs are one at a time, at most 6 an hour (`WHATSAPP_CODEX_RUNS_PER_HOUR`) and 5 minutes apart per rule. `whatsapp_alerts` reads what fired, with a cursor.
+- `whatsapp_schedule_message` / `whatsapp_list_scheduled` / `whatsapp_cancel_scheduled` — sent by the daemon at the time given; marked `missed` (never sent late) if the daemon was offline for more than `maxLateMinutes`, and `unknown` (never resent) if it stopped mid-send.
+- `whatsapp_draft_message` / `whatsapp_send_draft` — WhatsApp has no drafts for linked devices, so the relay keeps its own. A draft sends nothing until `whatsapp_send_draft`, which can take the user's edited text and send now or at a time. Codex is told to draft anything it wrote, or anything to a new contact or a group, and send only after you approve. Drafts appear in `whatsapp_list_scheduled`; `whatsapp_cancel_scheduled` discards one.
+- Logged out: when WhatsApp unlinks the device (about 14 days with the phone offline, or removed on the phone), the daemon shows a macOS notification and records a `system` entry in `whatsapp_alerts`. Relink with `whatsapp_start_auth`, with `phoneNumber` for a pairing code.
+- The MCP server sends instructions with every connection telling the model to use these tools rather than operating WhatsApp Desktop or WhatsApp Web through computer use.
+- `whatsapp_report_bug` — Codex reports a relay bug (tool, arguments, what went wrong) to `bug-reports.jsonl` in the data directory. A tool that crashes with a programming error files one by itself. Message text in arguments is replaced by its length. Point a coding agent at the file (for example `tail -F` it from a Claude Code or Codex session) to have reported bugs fixed without relaying them by hand.
+
+Everything else the phone can do:
+
+- `whatsapp_sync_history` with `untilDate` pages back to a date (50 per request, 2 s apart, `maxRequests` cap).
+- `whatsapp_media_text` — local transcription (voice notes, video), OCR (`tesseract`), PDF (`pdftotext`) and document text; the text becomes searchable.
+- `whatsapp_read_messages` with `threadOf` returns a reply thread. Reads show view-once flags, quoted text, mentions, contact cards and live poll tallies.
+- `whatsapp_list_chats` with `filter` (archived, pinned, muted, disappearing) and `order: "phone"` (pinned first).
+- `whatsapp_manage_chat` — archive, pin, mute, mark unread, clear, star.
+- `whatsapp_group_admin` — create, add/remove/promote/demote, subject, description, invite links, join, leave, settings.
+- `whatsapp_status` — read your contacts' status updates, or post one to an explicit audience.
+- `whatsapp_presence`, `whatsapp_block`, `whatsapp_send_contact`, and `mentions` in `whatsapp_send_message`.
+
+Sends are paced to keep the account clear of WhatsApp's spam detection: at most
+20 a minute overall, 6 a minute to one chat and 10 first messages to new chats
+an hour (`WHATSAPP_SEND_RATE_GLOBAL_PER_MIN`, `WHATSAPP_SEND_RATE_CHAT_PER_MIN`,
+`WHATSAPP_NEW_CHATS_PER_HOUR`). A send over the limit is refused with
+`status: rate_limited` and `retry_after_seconds`; it is never queued.
+
+If a sending call loses its connection to the daemon after it was submitted,
+the result says `outcome: unknown`; read the chat before trying again.
+
 ## CLI Fallback
 
 If you need to test outside Codex:
@@ -376,3 +481,72 @@ npm run whatsapp:auth
 npm run whatsapp:controller
 npm run whatsapp:status
 ```
+
+If scanning the QR code fails, link with a pairing code instead: pass your own
+number to `whatsapp_start_auth` as `phoneNumber`, or run
+`npm run whatsapp:auth -- --phone +15551234567`. On the phone, open Linked
+Devices -> Link a Device -> Link with phone number instead, and type the
+8-character code.
+
+### Optional final-send confirmations
+
+Codex supports per-tool approval policies. Enable confirmation for the relay's
+text/media send tools without prompting for reads or media preparation:
+
+```bash
+npm run confirmations -- on
+npm run confirmations -- status
+npm run confirmations -- off
+```
+
+This optional helper requires Python 3.11+ and edits only its managed block in
+`$CODEX_HOME/config.toml` (normally `~/.codex/config.toml`). Off removes the helper's
+policy overrides; it does not grant permissions or disable other safeguards.
+On restores the same selected tools. Existing conflicting policies are left
+untouched and require manual reconciliation. No messages are sent by the helper.
+
+To include connected Slack and Gmail final-send tools, supply the actual app IDs
+from their connector metadata on the first run:
+
+```bash
+npm run confirmations -- on --slack-app-id YOUR_SLACK_APP_ID --gmail-app-id YOUR_GMAIL_APP_ID
+```
+
+Separately named Codex MCP connections using the exact official Slack endpoint
+`https://mcp.slack.com/mcp` are also discovered automatically, including when
+Slack is the only configured service. Run `on` again after adding connections.
+The same toggle covers final sends in all discovered connections while keeping
+their existing enabled/disabled states and OAuth configuration intact. This
+does not authorize new Slack workspaces or implement a hosted account picker;
+each independent organization still needs its own OAuth authorization. Turning
+the toggle off restores the prior policy, including any user-owned prompts.
+
+Slack sends, scheduled messages, edits to posted messages, and final file sharing
+are covered; Gmail send, send-draft, and forwarding are covered. Slack upload-URL preparation, draft creation/editing, and known relay read/prepare tools receive explicit
+approval overrides so they do not prompt; other operations keep their existing policy. This uses native host approval controls, not
+a claim of server-side enforcement by the relay. Managed host policies take
+precedence; loading changes in an existing host depends on its configuration
+refresh support. Do not restart another session or job to apply these settings.
+The controller is a separate autonomous sender and is not gated by MCP tool
+approvals; keep it disabled unless explicitly authorized.
+
+The relay adds no ChatGPT signature to outbound content. Slack or another service
+may still display its own app identity; this setting does not hide platform labels.
+See the [official configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+and [plugin server policy](https://developers.openai.com/plugins/build/plugins).
+
+### Clean native reply preparation
+
+The optional `skills/connector-replies` skill provides native reply guidance for
+Gmail and Slack and makes the relay's reply limitations explicit. Install it in
+your Codex skills directory if you use those connectors. Its Python helper only
+prepares native Gmail draft arguments and validates supplied draft readback data;
+it has no credentials or network access and never sends mail.
+
+The helper uses the fetched Gmail message ID as `reply_message_id`, preserves
+the subject and intended recipient, and builds clean HTML/plain-text alternatives
+without copying a `>` quote chain from the parent. It distinguishes a follow-up
+to your own sent message from a reply to another sender. Native draft verification
+checks the actual thread, reply headers, recipients and MIME bodies before a send.
+Local fixture validation alone is not evidence that a hosted connector saved the
+correct draft. The hosted Gmail/Slack implementation is not changed by this skill.

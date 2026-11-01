@@ -1,14 +1,9 @@
 node_modules/
+__pycache__/
 plugins/whatsapp-relay/.venv-chatterbox/
 
-plugins/whatsapp-relay/data/auth*/
-plugins/whatsapp-relay/data/controller-config.json
-plugins/whatsapp-relay/data/controller-state.json
-plugins/whatsapp-relay/data/controller.log
-plugins/whatsapp-relay/data/controller-outbox/
-plugins/whatsapp-relay/data/controller-outbox.failed/
-plugins/whatsapp-relay/data/store.json
-plugins/whatsapp-relay/data/runtime.json
+# Runtime state, cached messages, media, and QR codes must never be committed.
+plugins/whatsapp-relay/data/
 
 npm-debug.log*
 .worktrees

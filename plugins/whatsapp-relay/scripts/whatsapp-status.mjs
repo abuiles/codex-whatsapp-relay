@@ -1,15 +1,19 @@
+// Reports the live session state without opening a second WhatsApp socket:
+// the relay runtime daemon (or the controller bridge) is the only owner.
+import { setTimeout as delay } from "node:timers/promises";
+
 import { ControllerConfigStore } from "./controller-config.mjs";
 import { getControllerProcessStatus } from "./controller-process.mjs";
+import { daemonRequest } from "./daemon-client.mjs";
 import { WhatsAppRuntime } from "./runtime.mjs";
 
-const runtime = new WhatsAppRuntime({
-  logLevel: process.env.WHATSAPP_LOG_LEVEL ?? "error"
-});
+const runtime = new WhatsAppRuntime({ logLevel: process.env.WHATSAPP_LOG_LEVEL ?? "error" });
 const controllerConfigStore = new ControllerConfigStore();
+const write = line => process.stdout.write(`${line}\n`);
 
 if (!runtime.hasSavedCreds()) {
-  process.stdout.write("status: not_authenticated\n");
-  process.stdout.write("next: use `whatsapp_start_auth` in Codex or run `npm run whatsapp:auth`\n");
+  write("status: not_authenticated");
+  write("next: use `whatsapp_start_auth` in Codex or run `npm run whatsapp:auth`");
   process.exit(0);
 }
 
@@ -19,38 +23,35 @@ const [controllerConfig, controllerProcessStatus] = await Promise.all([
 ]);
 
 if (controllerConfig.enabled && controllerProcessStatus.running) {
-  process.stdout.write(
-    `status: ${
-      controllerProcessStatus.process.whatsappStatus ?? "connected_via_bridge"
-    }\n`
-  );
-  process.stdout.write("live_session_owner: controller_bridge\n");
-  if (controllerProcessStatus.process.whatsappUserId) {
-    process.stdout.write(`user: ${controllerProcessStatus.process.whatsappUserId}\n`);
-  }
+  write(`status: ${controllerProcessStatus.process.whatsappStatus ?? "connected_via_bridge"}`);
+  write("live_session_owner: controller_bridge");
+  if (controllerProcessStatus.process.whatsappUserId) write(`user: ${controllerProcessStatus.process.whatsappUserId}`);
   if (controllerProcessStatus.process.whatsappLastDisconnect?.label) {
-    process.stdout.write(
-      `last_disconnect: ${controllerProcessStatus.process.whatsappLastDisconnect.label}\n`
-    );
+    write(`last_disconnect: ${controllerProcessStatus.process.whatsappLastDisconnect.label}`);
   }
   process.exit(0);
 }
 
-await runtime.start({ printQrToTerminal: false });
-
+let status;
 try {
-  const socket = await runtime.waitForConnection(20_000);
-  process.stdout.write("status: connected\n");
-  process.stdout.write(`user: ${socket.user?.id ?? "unknown"}\n`);
-  process.exit(0);
+  const deadline = Date.now() + 20_000;
+  do {
+    status = await daemonRequest("status", {}, { timeoutMs: 5_000 });
+    if (status.status === "connected" || status.released || status.status === "logged_out") break;
+    await delay(500);
+  } while (Date.now() < deadline);
 } catch (error) {
-  const summary = runtime.summary();
-  process.stdout.write(`status: ${summary.status}\n`);
-  if (summary.lastDisconnect?.label) {
-    process.stdout.write(`last_disconnect: ${summary.lastDisconnect.label}\n`);
-  }
-  process.stdout.write(
-    "next: use `whatsapp_start_auth` in Codex or rerun `npm run whatsapp:auth` if the session was logged out\n"
-  );
+  write("status: runtime_daemon_unavailable");
+  write(`error: ${error.message}`);
   process.exit(1);
 }
+
+write(`status: ${status.status}`);
+write(`runtime_daemon_pid: ${status.pid}`);
+if (status.user?.id) write(`user: ${status.user.id}`);
+if (status.released) write(`live_session_released: ${status.released.reason}${status.released.ownerPid ? ` (pid ${status.released.ownerPid})` : ""}`);
+if (status.lastDisconnect?.label) write(`last_disconnect: ${status.lastDisconnect.label}`);
+if (status.status !== "connected" && !status.released) {
+  write("next: call `whatsapp_reconnect` in Codex, or rerun `npm run whatsapp:auth` if the session was logged out");
+}
+process.exit(status.status === "connected" ? 0 : 1);

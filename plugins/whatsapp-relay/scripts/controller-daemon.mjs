@@ -7,6 +7,7 @@ import {
   releaseGlobalControllerOwner
 } from "./controller-owner.mjs";
 import { ControllerStateStore } from "./controller-state.mjs";
+import { releaseDaemonSession } from "./daemon-client.mjs";
 import { WhatsAppRuntime } from "./runtime.mjs";
 
 let activeBridge = null;
@@ -79,6 +80,9 @@ try {
   }
 
   ownsGlobalController = true;
+  // The relay runtime daemon holds the linked device; take it over for as long
+  // as this process lives instead of fighting it with a second socket.
+  await releaseDaemonSession("controller_bridge");
   await bridge.start();
   process.stdout.write("WhatsApp controller bridge started.\n");
 } catch (error) {

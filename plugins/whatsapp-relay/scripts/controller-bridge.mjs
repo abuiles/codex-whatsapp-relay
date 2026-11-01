@@ -27,6 +27,7 @@ import {
   resolvePermissionLevel
 } from "./controller-permissions.mjs";
 import { drainControllerCommands } from "./controller-outbox.mjs";
+import { prepareMedia, freezePreparedMedia } from "./media.mjs";
 import { ControllerStateStore, defaultProjectSession } from "./controller-state.mjs";
 import { extractAudioMessage, extractMessageText, extractMessageType } from "./store.mjs";
 import {
@@ -2004,6 +2005,24 @@ export class WhatsAppControllerBridge {
 
   async handleOutboxCommand(command = {}) {
     switch (command.type) {
+      case "send_media": {
+        if (!command.payload?.chatId) throw invalidControllerCommandError("Media command requires chatId.");
+        let media;
+        try { media = await freezePreparedMedia(await prepareMedia(command.payload)); }
+        catch (error) { throw invalidControllerCommandError(error.message); }
+        const socket = await this.runtime.ensureConnected();
+        try {
+          const sent = await socket.sendMessage(command.payload.chatId, media.content);
+          if (!sent?.key?.id) throw new Error("Media submission outcome unknown; verify before any retry.");
+          this.rememberOutgoingMessage(sent.key.id);
+          this.runtime.store.ingestSent(sent);
+        } catch (error) {
+          // A send failure may happen after acceptance; quarantine rather than resend.
+          error.retryable = false;
+          throw error;
+        }
+        return;
+      }
       case "send_message":
         if (!command?.payload?.chatId) {
           throw invalidControllerCommandError(
@@ -3651,8 +3670,15 @@ export class WhatsAppControllerBridge {
     const socket = await this.runtime.ensureConnected();
 
     for (const part of splitMessage(text)) {
-      const sent = await socket.sendMessage(chatId, { text: part });
-      this.rememberOutgoingMessage(sent?.key?.id ?? null);
+      try {
+        const sent = await socket.sendMessage(chatId, { text: part });
+        if (!sent?.key?.id) throw new Error("Text submission outcome unknown; verify before any retry.");
+        this.rememberOutgoingMessage(sent.key.id);
+        this.runtime.store.ingestSent(sent);
+      } catch (error) {
+        error.retryable = false;
+        throw error;
+      }
     }
   }
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Connector Replies"
+  short_description: "Prepare clean replies with native thread linkage"
+  default_prompt: "Use $connector-replies to prepare and verify a correctly threaded reply draft."
