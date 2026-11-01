@@ -430,5 +430,26 @@ test("loading a pre-v1 cache repairs unread counts from messages since the last 
   }));
   await store.load();
   assert.equal(store.data.chats[pn].unreadCount, 3);
-  assert.equal(store.data.meta.unreadModelVersion, 1);
+  assert.equal(store.data.meta.unreadModelVersion, 2);
+});
+
+test("status updates never count as unread, and a stale count is cleared when your reply is newest", async t => {
+  const store = await fixture(t);
+  const now = Math.floor(Date.now() / 1000);
+  await fs.writeFile(store.filePath, JSON.stringify({
+    meta: { unreadModelVersion: 1 },
+    chats: { "status@broadcast": { id: "status@broadcast", unreadCount: 65 }, [pn]: { id: pn, unreadCount: 1 } },
+    contacts: {},
+    messages: { [pn]: [
+      { id: "1", chatId: pn, fromMe: false, timestamp: now - 20, text: "q" },
+      { id: "2", chatId: pn, fromMe: true, timestamp: now - 10, text: "a" }
+    ] }
+  }));
+  await store.load();
+  assert.equal(store.data.chats["status@broadcast"].unreadCount, 0);
+  assert.equal(store.data.chats[pn].unreadCount, 0);
+  store.ingestMessage(message("s1", "status@broadcast", now, "my story", { key: { id: "s1", remoteJid: "status@broadcast", fromMe: false, participant: lid } }));
+  assert.equal(store.data.chats["status@broadcast"].unreadCount, 0);
+  assert.equal(store.inbox({ cursor: 0 }).messages.length, 0);
+  assert.equal(store.inbox({ cursor: 0, chatId: "status@broadcast" }).messages.length, 1);
 });

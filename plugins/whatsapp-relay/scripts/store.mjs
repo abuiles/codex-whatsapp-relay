@@ -30,7 +30,9 @@ function withReceiptEvidence(entry) {
   return { ...entry, deliveryStatus: status, receipts };
 }
 
-const UNREAD_MODEL_VERSION = 1;
+const UNREAD_MODEL_VERSION = 2;
+// Status updates are not a conversation; WhatsApp does not badge them as unread chats.
+const STATUS_JID = "status@broadcast";
 const UNREAD_REPAIR_WINDOW_SECONDS = 72 * 3600;
 const CIPHERTEXT = proto.WebMessageInfo.StubType.CIPHERTEXT;
 
@@ -256,7 +258,7 @@ export class WhatsAppStore {
         contacts: parsed.contacts ?? {},
         messages: parsed.messages ?? {}
       };
-      if (!parsed.meta?.unreadModelVersion) this.#repairUnreadCounts();
+      if ((parsed.meta?.unreadModelVersion ?? 0) < UNREAD_MODEL_VERSION) this.#repairUnreadCounts();
     } catch (error) {
       if (error?.code !== "ENOENT") {
         throw error;
@@ -264,10 +266,11 @@ export class WhatsAppStore {
     }
   }
 
-  // Caches written before unread model v1 lost counts: chats.update carries
-  // per-batch deltas that overwrote the total, and offline ("append") messages
-  // were never counted. Best effort: incoming messages since your last reply
-  // in that chat, within the last 72 hours, never lower than the stored count.
+  // Caches written before the current unread model lost counts: chats.update
+  // carries per-batch deltas that overwrote the total, and offline ("append")
+  // messages were never counted. Best effort: incoming messages since your
+  // last reply, within the last 72 hours, never lower than the stored count;
+  // zero when your reply is the newest message, and for status updates.
   #repairUnreadCounts() {
     const cutoff = Math.floor(Date.now() / 1000) - UNREAD_REPAIR_WINDOW_SECONDS;
     let changed = false;
@@ -276,8 +279,10 @@ export class WhatsAppStore {
       const lastMine = Math.max(0, ...messages.filter(entry => entry.fromMe).map(entry => entry.timestamp ?? 0));
       const since = Math.max(lastMine, cutoff);
       const recent = messages.filter(entry => isReadableIncoming(entry) && (entry.timestamp ?? 0) > since).length;
-      if (recent > (chat.unreadCount ?? 0)) {
-        chat.unreadCount = recent;
+      const newest = messages.reduce((a, b) => ((b.timestamp ?? 0) >= (a?.timestamp ?? 0) ? b : a), null);
+      const repaired = chatId === STATUS_JID || newest?.fromMe ? 0 : Math.max(chat.unreadCount ?? 0, recent);
+      if (repaired !== (chat.unreadCount ?? 0)) {
+        chat.unreadCount = repaired;
         changed = true;
       }
     }
@@ -647,7 +652,9 @@ export class WhatsAppStore {
     };
     if (incrementUnread && existingIndex < 0) {
       const chat = this.data.chats[remoteJid];
-      if (isReadableIncoming(messageEntry) && (messageEntry.timestamp ?? 0) > (chat.readAt ?? 0)) {
+      if (remoteJid === STATUS_JID) {
+        // Status updates still get an inbox sequence number, but no unread badge.
+      } else if (isReadableIncoming(messageEntry) && (messageEntry.timestamp ?? 0) > (chat.readAt ?? 0)) {
         chat.unreadCount += 1;
       } else if (messageEntry.fromMe && messageEntry.timestamp >= (chat.readAt ?? 0)) {
         // Replying from any device reads the chat, as it does on the phone.
@@ -776,7 +783,7 @@ export class WhatsAppStore {
   // Live arrivals after an inbox cursor, in arrival order. Without a cursor:
   // the unread messages of every unread chat, plus the current cursor.
   inbox({ cursor, chatId, includeFromMe = false, limit = 100 } = {}) {
-    const chatIds = chatId ? [this.canonicalJid(chatId)] : Object.keys(this.data.messages);
+    const chatIds = chatId ? [this.canonicalJid(chatId)] : Object.keys(this.data.messages).filter(id => id !== STATUS_JID);
     let entries;
     if (cursor === undefined) {
       entries = chatIds.flatMap(id => {

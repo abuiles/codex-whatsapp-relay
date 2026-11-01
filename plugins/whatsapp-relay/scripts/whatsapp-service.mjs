@@ -585,7 +585,7 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
     },
     {
       name: "whatsapp_inbox",
-      description: `Everything new across all chats, grouped by chat. Without a cursor: each unread chat's unread messages. With the cursor from the previous call: every message that arrived since, including offline backlog with old timestamps. Optional long-poll (waitSeconds, up to ${WAIT_MAX_SECONDS}s) when nothing is new. Reading does not mark anything read.`,
+      description: `Everything new across all chats, grouped by chat. Without a cursor: each unread chat's unread messages. With the cursor from the previous call: every message that arrived since, including offline backlog with old timestamps. Optional long-poll (waitSeconds, up to ${WAIT_MAX_SECONDS}s) when nothing is new. Status updates are left out unless chatId is status@broadcast. Reading does not mark anything read.`,
       input: {
         cursor: z.number().int().min(0).optional().describe("next_cursor from the previous whatsapp_inbox call"),
         ...chatTarget,
@@ -615,7 +615,7 @@ export function createWhatsAppService({ runtime, mode = "daemon", session = {}, 
           `mode: ${cursor === undefined ? "unread_snapshot" : "since_cursor"}`,
           `count: ${result.messages.length}`,
           `chats: ${byChat.size}`,
-          `truncated: ${result.truncated ? "yes; call again with next_cursor" : "no"}`,
+          `truncated: ${!result.truncated ? "no" : cursor === undefined ? "yes; showing the newest, raise limit or pass chatId" : "yes; call again with next_cursor"}`,
           `next_cursor: ${result.nextCursor}`
         ];
         for (const [id, messages] of byChat) {
